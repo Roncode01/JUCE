@@ -1,5 +1,16 @@
 #include "PluginEditor.h"
 
+void ActivityMeter::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (0xff0a0a0c));
+    auto level = 0.5f + 0.5f * std::sin (phase);
+    auto bounds = getLocalBounds().toFloat().reduced (2.0f);
+    g.setColour (juce::Colours::darkgrey);
+    g.drawRect (bounds, 1.0f);
+    g.setColour (juce::Colours::orange);
+    g.fillRect (bounds.reduced (2.0f).removeFromLeft (bounds.getWidth() * level));
+}
+
 D2DReproVst3Editor::D2DReproVst3Editor (D2DReproVst3Processor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
@@ -20,7 +31,9 @@ D2DReproVst3Editor::D2DReproVst3Editor (D2DReproVst3Processor& p)
     linearAttach = std::make_unique<juce::SliderParameterAttachment> (
         *processorRef.apvts.getParameter ("linear"), linear, nullptr);
 
-    setSize (420, 320);
+    addAndMakeVisible (activityMeter);
+
+    setSize (420, 360);
 }
 
 void D2DReproVst3Editor::paint (juce::Graphics& g)
@@ -36,4 +49,6 @@ void D2DReproVst3Editor::resized()
     rotary2.setBounds (top.removeFromRight (140));
     area.removeFromTop (20);
     linear.setBounds (area.removeFromTop (40));
+    area.removeFromTop (20);
+    activityMeter.setBounds (area.removeFromTop (24));
 }
