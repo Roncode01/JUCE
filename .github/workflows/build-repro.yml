@@ -15,7 +15,6 @@ jobs:
       - name: Collect
         shell: pwsh
         run: |
-        run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Get-ChildItem -Recurse cmake-build -Filter "D2D Repro.exe" | Copy-Item -Destination dist/
           Get-ChildItem -Recurse dist | Select-Object FullName, Length
