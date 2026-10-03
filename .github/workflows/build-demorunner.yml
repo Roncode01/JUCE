@@ -1,0 +1,29 @@
+name: Build Demo Runner
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows-demorunner:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake . -B cmake-build -DJUCE_BUILD_EXAMPLES=ON -DJUCE_BUILD_EXTRAS=ON
+
+      - name: Build DemoRunner
+        run: cmake --build cmake-build --target DemoRunner --config Release
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Get-ChildItem -Recurse cmake-build -Filter "DemoRunner.exe" | Copy-Item -Destination dist/
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DemoRunner-windows
+          path: dist
