@@ -1,0 +1,28 @@
+name: Build D2D Repro VST3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-repro-vst3:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S D2DReproVst3 -B cmake-build
+
+      - name: Build VST3
+        run: cmake --build cmake-build --config Release --target D2DReproVst3_VST3
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -Recurse "cmake-build\D2DReproVst3_artefacts\Release\VST3\D2D Repro VST3.vst3" dist/
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: D2DReproVst3-windows
+          path: dist
