@@ -20,6 +20,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Get-ChildItem -Recurse cmake-build -Filter "DemoRunner.exe" | Copy-Item -Destination dist/
+          Copy-Item -Recurse examples dist/examples
           Get-ChildItem -Recurse dist | Select-Object FullName, Length
 
       - uses: actions/upload-artifact@v4
