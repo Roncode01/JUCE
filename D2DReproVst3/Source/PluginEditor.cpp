@@ -38,22 +38,41 @@ D2DReproVst3Editor::D2DReproVst3Editor (D2DReproVst3Processor& p)
 
     addAndMakeVisible (activityMeter);
 
-    setSize (420, 380);
+    // Plain slider (no parameter/attachment -- this is a test control, not something meant for
+    // host automation). Skewed so the lower, more-likely-interesting range (tens to a couple
+    // hundred Hz) gets more of the slider's travel than the upper end toward the 1000Hz ceiling.
+    // Integer-stepped and suffixed so the text box always reads as a clean "NNN Hz" value.
+    timerFreqSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    timerFreqSlider.setRange (5.0, 1000.0, 1.0);
+    timerFreqSlider.setSkewFactorFromMidPoint (100.0);
+    timerFreqSlider.setTextValueSuffix (" Hz");
+    timerFreqSlider.setNumDecimalPlacesToDisplay (0);
+    timerFreqSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 20);
+    timerFreqSlider.setValue (30.0);   // matches the activity bar's starting rate
+    timerFreqSlider.onValueChange = [this]
+    {
+        activityMeter.setRefreshHz ((int) timerFreqSlider.getValue());
+    };
+    addAndMakeVisible (timerFreqSlider);
+
+    setSize (420, 440);
 }
 
 void D2DReproVst3Editor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff0a0a0c));
 
-    auto drawLabel = [&] (const juce::String& text, juce::Rectangle<int> knobBounds)
+    auto drawLabel = [&] (const juce::String& text, juce::Rectangle<int> bounds, int yOffset = -20)
     {
         g.setColour (juce::Colours::lightgrey);
         g.setFont (juce::FontOptions (14.0f));
-        g.drawText (text, knobBounds.withY (knobBounds.getY() - 20).withHeight (18),
+        g.drawText (text, bounds.withY (bounds.getY() + yOffset).withHeight (18),
                     juce::Justification::centred, false);
     };
     drawLabel ("H+V drag", rotary1.getBounds());
     drawLabel ("V-only drag", rotary2.getBounds());
+    drawLabel ("Activity bar rate (static once set -- watch here with nothing else moving)",
+               timerFreqSlider.getBounds(), -18);
 }
 
 void D2DReproVst3Editor::resized()
@@ -65,6 +84,8 @@ void D2DReproVst3Editor::resized()
     rotary2.setBounds (top.removeFromRight (140));
     area.removeFromTop (20);
     linear.setBounds (area.removeFromTop (40));
+    area.removeFromTop (30);   // extra room -- this row's label is longer, sits above it
+    timerFreqSlider.setBounds (area.removeFromTop (40));
     area.removeFromTop (20);
     activityMeter.setBounds (area.removeFromTop (24));
 }
