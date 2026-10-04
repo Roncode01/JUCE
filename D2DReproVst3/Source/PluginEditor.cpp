@@ -14,14 +14,19 @@ void ActivityMeter::paint (juce::Graphics& g)
 D2DReproVst3Editor::D2DReproVst3Editor (D2DReproVst3Processor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
-    for (auto* s : { &rotary1, &rotary2 })
-    {
-        s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        s->setTextBoxStyle (juce::Slider::TextBoxBelow, false, 80, 20);
-        addAndMakeVisible (s);
-    }
+    // rotary1: unchanged -- RotaryHorizontalVerticalDrag, the style every control in the real
+    // plugin uses, and the one already confirmed to flicker in this repro.
+    rotary1.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    rotary1.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 80, 20);
+    addAndMakeVisible (rotary1);
     rotary1Attach = std::make_unique<juce::SliderParameterAttachment> (
         *processorRef.apvts.getParameter ("rotary1"), rotary1, nullptr);
+
+    // rotary2: single-axis vertical-only drag, no horizontal contribution -- isolates whether
+    // the dual-axis combining specifically (as opposed to rotary controls generally) matters.
+    rotary2.setSliderStyle (juce::Slider::RotaryVerticalDrag);
+    rotary2.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 80, 20);
+    addAndMakeVisible (rotary2);
     rotary2Attach = std::make_unique<juce::SliderParameterAttachment> (
         *processorRef.apvts.getParameter ("rotary2"), rotary2, nullptr);
 
@@ -33,17 +38,28 @@ D2DReproVst3Editor::D2DReproVst3Editor (D2DReproVst3Processor& p)
 
     addAndMakeVisible (activityMeter);
 
-    setSize (420, 360);
+    setSize (420, 380);
 }
 
 void D2DReproVst3Editor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff0a0a0c));
+
+    auto drawLabel = [&] (const juce::String& text, juce::Rectangle<int> knobBounds)
+    {
+        g.setColour (juce::Colours::lightgrey);
+        g.setFont (juce::FontOptions (14.0f));
+        g.drawText (text, knobBounds.withY (knobBounds.getY() - 20).withHeight (18),
+                    juce::Justification::centred, false);
+    };
+    drawLabel ("H+V drag", rotary1.getBounds());
+    drawLabel ("V-only drag", rotary2.getBounds());
 }
 
 void D2DReproVst3Editor::resized()
 {
     auto area = getLocalBounds().reduced (30);
+    area.removeFromTop (20);   // room for the knob labels drawn in paint()
     auto top = area.removeFromTop (160);
     rotary1.setBounds (top.removeFromLeft (140));
     rotary2.setBounds (top.removeFromRight (140));
