@@ -51,7 +51,7 @@ D2DReproVst3Editor::D2DReproVst3Editor (D2DReproVst3Processor& p)
     timerFreqSlider.setValue (30.0);   // matches the activity bar's starting rate
     timerFreqSlider.onValueChange = [this]
     {
-        activityMeter.setRefreshHz ((int) timerFreqSlider.getValue());
+        activityMeter.setApproxTargetHz ((int) timerFreqSlider.getValue());
     };
     addAndMakeVisible (timerFreqSlider);
 
@@ -71,7 +71,7 @@ void D2DReproVst3Editor::paint (juce::Graphics& g)
     };
     drawLabel ("H+V drag", rotary1.getBounds());
     drawLabel ("V-only drag", rotary2.getBounds());
-    drawLabel ("Activity bar rate (static once set -- watch here with nothing else moving)",
+    drawLabel ("Activity bar rate -- now VBlank-driven, not Timer (approx. Hz; static once set)",
                timerFreqSlider.getBounds(), -18);
 }
 

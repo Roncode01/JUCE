@@ -3,23 +3,47 @@
 #include "PluginProcessor.h"
 
 // A small, self-contained bar that animates and repaints itself continuously, regardless of user
-// interaction -- mirroring exactly how the real plugin's meter panels work (a dedicated
-// sub-component with its own paint(), driven by its own Timer). setRefreshHz() lets the editor
-// change its rate live, for testing whether background repaint load alone -- with no control
-// being dragged at all -- can trigger flickering once pushed high enough.
-class ActivityMeter : public juce::Component, private juce::Timer
+// interaction -- mirroring the real plugin's meter panels, but now driven by VBlankAttachment
+// instead of Timer, following the pattern JUCE's own Direct2D developer (attila, on the JUCE
+// forum) recommends specifically for this class of problem: a Timer's repaint() request and its
+// actual paint() are not guaranteed to land in the same frame, whereas VBlankAttachment
+// guarantees they do. Testing whether that synchronisation gap -- not just repaint volume -- is
+// what the earlier Timer-based version was actually exposing.
+//
+// There's no reliable cross-platform way to query the display's true refresh rate through
+// VBlankAttachment (confirmed on the JUCE forum thread this is based on), so setApproxTargetHz()
+// approximates a target rate by skipping vblank callbacks, assuming a 60Hz display as the
+// baseline divisor -- an approximation, not an exact Hz, but enough to explore a comparable
+// range to the earlier Timer-based version.
+class ActivityMeter : public juce::Component
 {
 public:
-    ActivityMeter() { startTimerHz (30); }
-    ~ActivityMeter() override { stopTimer(); }
+    ActivityMeter() = default;
 
-    void setRefreshHz (int hz) { startTimerHz (juce::jlimit (1, 1000, hz)); }
+    void setApproxTargetHz (int hz)
+    {
+        skipEvery = juce::jmax (1, (int) std::round (60.0 / (double) juce::jlimit (1, 1000, hz)));
+        tickCounter = 0;
+    }
 
     void paint (juce::Graphics& g) override;
 
 private:
-    void timerCallback() override { phase += 0.15f; repaint(); }
+    void onVBlank (double)
+    {
+        if (++tickCounter >= skipEvery)
+        {
+            tickCounter = 0;
+            phase += 0.15f;
+            repaint();
+        }
+    }
+
+    int skipEvery = 2;   // ~30Hz at the assumed 60Hz baseline, matching the earlier version's start
+    int tickCounter = 0;
     float phase = 0.0f;
+
+    juce::VBlankAttachment vblank { this, [this] (double t) { onVBlank (t); } };
 };
 
 // Exact same UI as the standalone D2DRepro app (near-black background, two rotary knobs, one
@@ -27,9 +51,10 @@ private:
 // SliderParameterAttachment, same mechanism the real plugin's own knobs use, rather than being
 // freestanding/unconnected sliders. rotary1 is RotaryHorizontalVerticalDrag (dual-axis, matches
 // the real plugin); rotary2 is RotaryVerticalDrag (single-axis), for isolating whether the
-// dual-axis combining specifically matters. Also includes an ActivityMeter for continuous
-// background repaint load, and a plain (unparameterised -- this is a test control, not something
-// meant for host automation) slider that adjusts the ActivityMeter's rate live.
+// dual-axis combining specifically matters. Also includes an ActivityMeter (now VBlank-driven,
+// see above) for continuous background repaint load, and a plain (unparameterised -- this is a
+// test control, not something meant for host automation) slider that adjusts its approximate
+// rate live.
 class D2DReproVst3Editor : public juce::AudioProcessorEditor
 {
 public:
