@@ -10,10 +10,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 include(FetchContent)
+
+# Testing a candidate fix: reuk's unmerged "Direct2D: Avoid rendering frames before swapchain
+# becomes ready" patch (posted on the JUCE forum 2026-07-17, confirmed as of 2026-10-07 to be
+# absent from both the 9.0.3 tag and current develop -- i.e. not yet in any release). It adds
+# proper backpressure via the DXGI frame-latency waitable object: swap.canPresent() now blocks a
+# new frame from being considered ready until DXGI signals the previous one has actually been
+# consumed, instead of racing ahead of it. The thread that originally raised this (laggy mouse
+# tracking on slow GPUs under heavy paint load) is a different *symptom* than our flickering, but
+# the same underlying mechanism -- presenting without waiting for the prior frame's real DWM
+# handoff -- is a plausible cause of exactly the kind of corrupted-frame artifacts we're seeing
+# under concurrent drag + background-repaint load on a monitor whose vblank cadence doesn't match
+# our assumptions. PATCH_COMMAND applies it to the fetched JUCE source during the populate step,
+# verified against a real FetchContent run (not just a bare `git apply`) before use here.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        9.0.3
-    GIT_SHALLOW    ON)
+    GIT_SHALLOW    ON
+    PATCH_COMMAND  git apply --whitespace=nowarn
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-frame-latency-wait.patch")
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(D2DReproVst3
@@ -28,8 +43,8 @@ juce_add_plugin(D2DReproVst3
     IS_SYNTH                   FALSE
     NEEDS_MIDI_INPUT           FALSE
     NEEDS_MIDI_OUTPUT          FALSE
-    IS_MIDI_EFFECT             FALSE
-    COPY_PLUGIN_AFTER_BUILD    FALSE)
+    IS_MIDI_EFFECT              FALSE
+    COPY_PLUGIN_AFTER_BUILD     FALSE)
 
 target_sources(D2DReproVst3 PRIVATE
     Source/PluginProcessor.h
