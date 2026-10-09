@@ -1,0 +1,22 @@
+diff --git a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
+index e92f36c..0bca3ec 100644
+--- a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
++++ b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
+@@ -508,8 +508,15 @@ public:
+             return;
+         }
+ 
+-        if (hr == S_OK)
+-            swap.didPresent();
++        // hr is a success code here (FAILED already returned above). That includes
++        // DXGI_STATUS_OCCLUDED and similar non-S_OK success codes, which Present1 returns
++        // while the window is occluded -- e.g. behind the lock screen or screensaver.
++        // DXGI still accepted the frame in that case, so the throttle should still reset;
++        // checking hr == S_OK specifically left didWait stuck true for the whole occluded
++        // period (canPresent() short-circuits without waiting), silently re-opening the
++        // original un-throttled race once the session unlocked, until the editor was
++        // closed and reopened and rebuilt the swap chain from scratch.
++        swap.didPresent();
+ 
+         // There's nothing waiting to be displayed in the backbuffer.
+         deferredRepaints.clear();

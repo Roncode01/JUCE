@@ -19,12 +19,28 @@ include(FetchContent)
 # experiment, never something in the production code. Same patch file, same PATCH_COMMAND
 # mechanism as the VBlankAttachment build; nothing about the patch itself changes between variants
 # since it only touches JUCE's own swap-chain code, not ours.
+#
+# A second, local patch (direct2d-occlusion-didpresent.patch) is applied on top, added 2026-10-09
+# after flicker was reported returning specifically after a Windows lock-screen/screensaver
+# transition, fixed by closing and reopening the editor. Root cause: reuk's patch only resets its
+# present-throttle latch when Present1 returns exactly S_OK, but Present1 returns a different
+# (still-successful) code, DXGI_STATUS_OCCLUDED, while the window is occluded -- which a locked
+# or screensaver'd session is. That left the throttle stuck "unlocked" (i.e. disabled) for the
+# whole occluded period, silently reintroducing the original un-throttled race once the session
+# unlocked -- until the editor was closed/reopened, which rebuilds the swap chain and its throttle
+# state from scratch. The fix resets the latch on any successful Present1 (FAILED is still handled
+# separately above it), not only hr == S_OK. See README.md for the verification record. NOT YET
+# tested against a real lock-screen/screensaver repro (needs a Windows machine) -- this patch is
+# a candidate fix pending that confirmation, same as the base patch was before its own D2DReproVst3
+# verification.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        9.0.3
     GIT_SHALLOW    ON
     PATCH_COMMAND  git apply --whitespace=nowarn
-                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-frame-latency-wait.patch")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-frame-latency-wait.patch" &&
+                   git apply --whitespace=nowarn
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-occlusion-didpresent.patch")
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(D2DReproVst3
