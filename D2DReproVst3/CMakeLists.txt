@@ -14,25 +14,31 @@ include(FetchContent)
 # reuk's unmerged "Direct2D: Avoid rendering frames before swapchain becomes ready" patch --
 # already confirmed (2026-10-07) to eliminate the flicker in the VBlankAttachment variant of this
 # repro. This build goes back to the plain Timer-driven ActivityMeter (matching how the real
-# plugin's meter panels actually work) specifically to test the patch against *that* mechanism
-# before carrying it over to the real plugin -- the VBlankAttachment swap was only ever a repro
-# experiment, never something in the production code. Same patch file, same PATCH_COMMAND
-# mechanism as the VBlankAttachment build; nothing about the patch itself changes between variants
-# since it only touches JUCE's own swap-chain code, not ours.
+# plugin's meter panels actually work).
 #
-# A second, local patch (direct2d-occlusion-didpresent.patch) is applied on top, added 2026-10-09
-# after flicker was reported returning specifically after a Windows lock-screen/screensaver
-# transition, fixed by closing and reopening the editor. Root cause: reuk's patch only resets its
-# present-throttle latch when Present1 returns exactly S_OK, but Present1 returns a different
-# (still-successful) code, DXGI_STATUS_OCCLUDED, while the window is occluded -- which a locked
-# or screensaver'd session is. That left the throttle stuck "unlocked" (i.e. disabled) for the
-# whole occluded period, silently reintroducing the original un-throttled race once the session
-# unlocked -- until the editor was closed/reopened, which rebuilds the swap chain and its throttle
-# state from scratch. The fix resets the latch on any successful Present1 (FAILED is still handled
-# separately above it), not only hr == S_OK. See README.md for the verification record. NOT YET
-# tested against a real lock-screen/screensaver repro (needs a Windows machine) -- this patch is
-# a candidate fix pending that confirmation, same as the base patch was before its own D2DReproVst3
-# verification.
+# ============================================================================
+# THIS IS A DIAGNOSTIC BUILD, NOT A FIX CANDIDATE.
+# ============================================================================
+# Added 2026-10-10. Deliberately does NOT include direct2d-occlusion-didpresent.patch (the
+# second, not-yet-field-confirmed patch from the 1.20.0 candidate). That patch changes control
+# flow (unconditionally resets the present-throttle on any non-S_OK success code), which would
+# confound this build's purpose: finding out which actual HRESULT Present1() returns during
+# screensaver, lock-screen, hibernate, sleep and display-off transitions.
+#
+# Earlier analysis (both the original patch author's own comments and this project's own
+# reasoning) assumed the relevant code is DXGI_STATUS_OCCLUDED. A later review turned up that
+# Microsoft's own documentation states DXGI_STATUS_OCCLUDED is never returned for a flip-model
+# swap chain -- which is what this file's SwapChain actually creates (DXGI_SWAP_EFFECT_FLIP_
+# SEQUENTIAL). So the "it's occlusion" premise behind every fix attempt so far may simply be
+# wrong, and no further fix design should be trusted until the real HRESULT value(s) are known.
+#
+# direct2d-present-diagnostic.patch adds a small logging hook (Direct2DPresentDiagnostic::
+# onPresent1Result) called right after every real Present1() call, before any existing control
+# flow runs. It is purely observational -- it does not alter canPresent()/didPresent() or any
+# return value -- so this build is expected to still flicker under the same triggers as before
+# (screensaver, lock screen, hibernate). That's expected and not a regression: this build's only
+# job is to produce %TEMP%\d2d_present_diagnostic.log with the real HRESULT values logged across
+# those triggers. See README.md for what to do with that log.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        9.0.3
@@ -40,16 +46,17 @@ FetchContent_Declare(JUCE
     PATCH_COMMAND  git apply --whitespace=nowarn
                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-frame-latency-wait.patch" &&
                    git apply --whitespace=nowarn
-                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-occlusion-didpresent.patch")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-present-diagnostic.patch")
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(D2DReproVst3
     COMPANY_NAME               "Your Company"
     PLUGIN_MANUFACTURER_CODE   Yrco
-    PLUGIN_CODE                D2dr        # distinct from the main plugin (Spba) and the JUCE9
-                                            # eval build (Sp9e) -- installs alongside both
-    BUNDLE_ID                  com.yourcompany.d2dreprovst3
-    PRODUCT_NAME               "D2D Repro VST3"
+    PLUGIN_CODE                D2dg        # distinct from D2DReproVst3's other codes (D2dr) and
+                                            # the main plugin (Spba) -- installs alongside all of
+                                            # them without overwriting any
+    BUNDLE_ID                  com.yourcompany.d2dreprovst3.diagnostic
+    PRODUCT_NAME               "D2D Repro VST3 (Diagnostic)"
     FORMATS                    VST3
     VST3_CATEGORIES            Fx Tools
     IS_SYNTH                   FALSE

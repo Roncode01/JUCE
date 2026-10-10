@@ -1,0 +1,125 @@
+diff --git a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
+index e92f36c..0153e8e 100644
+--- a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
++++ b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
+@@ -32,6 +32,110 @@
+   ==============================================================================
+ */
+ 
++// ============================================================================
++// DIAGNOSTIC LOGGING (temporary -- not part of any real fix)
++//
++// Added to find out which actual HRESULT Present1() returns during screensaver,
++// lock-screen, hibernate, sleep and display-off transitions, rather than
++// continuing to guess (prior analysis assumed DXGI_STATUS_OCCLUDED, but
++// Microsoft's own docs say that code is never returned for a flip-model swap
++// chain, which is what this file creates -- so the real code is currently
++// unknown). Purely observational: does not change canPresent()/didPresent() or
++// any control flow. Logs every time Present1()'s returned HRESULT changes,
++// with a timestamp and how long the previous value held, to
++// %TEMP%\d2d_present_diagnostic.log (and mirrored to OutputDebugStringA for
++// anyone watching with a debugger/DebugView attached).
++//
++// Remove this whole block, and its one call site in Pimpl::paint() below,
++// once real values have been captured.
++#include <cstdio>
++#include <cstdint>
++#include <chrono>
++
++namespace Direct2DPresentDiagnostic
++{
++    inline const char* decodeHresult (HRESULT hr) noexcept
++    {
++        switch ((unsigned long) hr)
++        {
++            case 0x00000000UL: return "S_OK";
++            case 0x087A0001UL: return "DXGI_STATUS_OCCLUDED (not expected -- flip model)";
++            case 0x087A0007UL: return "DXGI_STATUS_MODE_CHANGED";
++            case 0x087A0008UL: return "DXGI_STATUS_MODE_CHANGE_IN_PROGRESS";
++            case 0x887A0001UL: return "DXGI_ERROR_INVALID_CALL";
++            case 0x887A0005UL: return "DXGI_ERROR_DEVICE_REMOVED";
++            case 0x887A0006UL: return "DXGI_ERROR_DEVICE_HUNG";
++            case 0x887A0007UL: return "DXGI_ERROR_DEVICE_RESET";
++            case 0x887A0026UL: return "DXGI_ERROR_ACCESS_LOST";
++            default:           return "unrecognised -- look up this hex value";
++        }
++    }
++
++    inline void logLine (const char* text) noexcept
++    {
++        OutputDebugStringA (text);
++
++        char tempPath[MAX_PATH]{};
++        if (GetTempPathA (MAX_PATH, tempPath) != 0)
++        {
++            char fullPath[MAX_PATH + 64]{};
++            std::snprintf (fullPath, sizeof (fullPath), "%sd2d_present_diagnostic.log", tempPath);
++
++            if (auto* f = std::fopen (fullPath, "a"))
++            {
++                std::fputs (text, f);
++                std::fclose (f);
++            }
++        }
++    }
++
++    inline void onPresent1Result (HRESULT hr) noexcept
++    {
++        static HRESULT lastHr = S_OK;
++        static std::uint32_t countSinceTransition = 0;
++        static auto lastTransitionTime = std::chrono::steady_clock::now();
++        static bool first = true;
++
++        ++countSinceTransition;
++
++        if (! first && hr == lastHr)
++            return;
++
++        const auto now = std::chrono::steady_clock::now();
++        const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds> (now - lastTransitionTime).count();
++
++        SYSTEMTIME st;
++        GetLocalTime (&st);
++
++        char line[384]{};
++
++        if (first)
++        {
++            std::snprintf (line, sizeof (line),
++                            "[%02u:%02u:%02u.%03u] D2D_DIAG start: hr=0x%08lX (%s)\n",
++                            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
++                            (unsigned long) hr, decodeHresult (hr));
++            first = false;
++        }
++        else
++        {
++            std::snprintf (line, sizeof (line),
++                            "[%02u:%02u:%02u.%03u] D2D_DIAG transition: hr=0x%08lX (%s) held for %u calls (%lld ms) -> hr=0x%08lX (%s)\n",
++                            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
++                            (unsigned long) lastHr, decodeHresult (lastHr),
++                            countSinceTransition, (long long) heldMs,
++                            (unsigned long) hr, decodeHresult (hr));
++        }
++
++        logLine (line);
++
++        lastHr = hr;
++        countSinceTransition = 0;
++        lastTransitionTime = now;
++    }
++}
++// ========================= END DIAGNOSTIC LOGGING ==========================
++
+ namespace juce
+ {
+ 
+@@ -502,6 +606,9 @@ public:
+         const auto hr = swap.getChain()->Present1 (swap.presentSyncInterval,
+                                                    swap.presentFlags,
+                                                    &params);
++
++        Direct2DPresentDiagnostic::onPresent1Result (hr);
++
+         if (FAILED (hr))
+         {
+             jassertfalse;
