@@ -19,8 +19,14 @@ else.
 - Adds `direct2d-present-diagnostic.patch`, a small logging hook called immediately after every
   real `Present1()` call, before any of JUCE's own code reacts to the result. It doesn't change
   what any function returns or does -- it only watches and logs.
-- Distinct plugin code (`D2dg`) and bundle ID, so it installs alongside your existing D2DReproVst3
-  and the main plugin without overwriting either.
+- Distinct plugin code (`D2dg`) from the other D2DReproVst3 build (`D2dr`), so REAPER's own
+  plugin-identity tracking (FX chains, saved projects) can tell them apart. `PRODUCT_NAME` is
+  deliberately left unchanged, though, because your CI workflow's artifact-collection step has
+  that exact filename hardcoded -- so **this build's `.vst3` has the same filename as your other
+  D2DReproVst3 build and will replace whichever one is currently installed**, the same way
+  1.19.0 replaces 1.18.0 for the main plugin. It won't sit side-by-side with your existing
+  D2DReproVst3 instance; install this one, run the trigger list, then reinstall the other build
+  afterwards if you still need it.
 
 ## What it logs
 
@@ -54,8 +60,9 @@ so it still captures codes we didn't anticipate):
 ## How to use it
 
 1. Build and install this exactly like the other D2DReproVst3 builds (`cmake -S . -B build -A x64`
-   then build the `D2DReproVst3_VST3` target). Load it in REAPER alongside (or instead of) your
-   existing D2DReproVst3 instance -- the distinct plugin code means it won't collide.
+   then build the `D2DReproVst3_VST3` target). This replaces whichever D2DReproVst3 build you
+   currently have installed (same bundle filename, by design -- see "What's different" above),
+   so load it in REAPER in place of your existing instance rather than expecting both at once.
 2. Before testing, delete any existing `%TEMP%\d2d_present_diagnostic.log` so you're starting
    clean (it appends, so an old run's lines would otherwise mix in).
 3. Open the plugin's editor, leave it open and visible, and run through the same trigger list as

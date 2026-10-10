@@ -52,11 +52,26 @@ FetchContent_MakeAvailable(JUCE)
 juce_add_plugin(D2DReproVst3
     COMPANY_NAME               "Your Company"
     PLUGIN_MANUFACTURER_CODE   Yrco
-    PLUGIN_CODE                D2dg        # distinct from D2DReproVst3's other codes (D2dr) and
-                                            # the main plugin (Spba) -- installs alongside all of
-                                            # them without overwriting any
+    PLUGIN_CODE                D2dg        # distinct from D2DReproVst3's other build (D2dr) and
+                                            # the main plugin (Spba). PRODUCT_NAME below is
+                                            # unchanged, so this still produces the same-named
+                                            # .vst3 bundle and will replace whichever D2DReproVst3
+                                            # build is currently installed -- this code just keeps
+                                            # REAPER's own plugin-identity tracking (FX chains,
+                                            # saved projects referencing this slot) distinct from
+                                            # the other build's, the same way swapping 1.19.0 for
+                                            # 1.20.0 already works for the main plugin.
     BUNDLE_ID                  com.yourcompany.d2dreprovst3.diagnostic
-    PRODUCT_NAME               "D2D Repro VST3 (Diagnostic)"
+    PRODUCT_NAME               "D2D Repro VST3"   # deliberately unchanged from the other
+                                            # D2DReproVst3 builds -- this is what controls the
+                                            # built .vst3 bundle's filename on disk, and your CI
+                                            # workflow's Copy-Item step has that filename
+                                            # hardcoded. Changing it (as an earlier version of
+                                            # this file did) breaks that copy step with "Cannot
+                                            # find path". PLUGIN_CODE and BUNDLE_ID above are
+                                            # what actually keep this installing side-by-side
+                                            # with your other builds, so nothing is lost by
+                                            # leaving this alone.
     FORMATS                    VST3
     VST3_CATEGORIES            Fx Tools
     IS_SYNTH                   FALSE
