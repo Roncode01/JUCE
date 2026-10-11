@@ -16,9 +16,21 @@ else.
   to capture. So: **this build is expected to still flicker** under the same triggers you found
   before (screensaver, lock screen, hibernate). That's expected, not a regression -- flicker isn't
   what we're testing here.
-- Adds `direct2d-present-diagnostic.patch`, a small logging hook called immediately after every
-  real `Present1()` call, before any of JUCE's own code reacts to the result. It doesn't change
-  what any function returns or does -- it only watches and logs.
+- Adds `direct2d-present-diagnostic.patch`, which logs **two** probes every paint, each tracked
+  and logged independently:
+  - **"Present1 normal"** -- the real present this file already made. Its result and flags are
+    unchanged from before; the logging hook just watches, placed before any of JUCE's own code
+    reacts to the result.
+  - **"Present1 test"** -- a second call added on review, made immediately after the real one,
+    using `DXGI_PRESENT_TEST` (submits no frame -- Microsoft's documented way to check
+    presentability without presenting:
+    <https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiswapchain-present>).
+    No code in this project currently calls `DXGI_PRESENT_TEST` for real (the "occlusion-standby"
+    design that would have was deliberately kept out of this diagnostic build), so without this
+    second probe there'd be nothing here to show what a test-present reports during an
+    occluded/transitioning period -- this adds that second, independent data point. Its result
+    is only logged, never acted on, so it can't change behaviour.
+  Neither probe changes what any function returns or does -- both only watch and log.
 - Distinct plugin code (`D2dg`) from the other D2DReproVst3 build (`D2dr`), so REAPER's own
   plugin-identity tracking (FX chains, saved projects) can tell them apart. `PRODUCT_NAME` is
   deliberately left unchanged, though, because your CI workflow's artifact-collection step has
@@ -30,17 +42,20 @@ else.
 
 ## What it logs
 
-Every time `Present1()`'s returned `HRESULT` changes from the previous call, it writes one line
-to:
+Every time either probe's returned `HRESULT` changes from its own previous call, it writes one
+line to:
 
 ```
 %TEMP%\d2d_present_diagnostic.log
 ```
 
 (also mirrored via `OutputDebugStringA`, in case you have DebugView or a debugger attached). Each
-line has a timestamp, the previous code (decoded to a name where recognised), how many consecutive
-`Present1()` calls held that code, and the new code it's transitioning to. The very first call
-present also always logs a "start" line, so you've got a reference point for the hr AT launch.
+line is tagged `[Present1 normal]` or `[Present1 test]` so you can tell which probe it's from (the
+two are tracked completely separately -- one changing never resets the other's counter), and has
+a timestamp, the previous code (decoded to a name where recognised), how many consecutive calls of
+that probe held that code, the new code it's transitioning to, and that probe's sync interval and
+present flags. Each probe also always logs its own "start" line on its first call, so you've got a
+reference point for both at launch.
 
 Recognised codes (anything else logs as "unrecognised -- look up this hex value", verbatim hex,
 so it still captures codes we didn't anticipate):
@@ -79,13 +94,17 @@ so it still captures codes we didn't anticipate):
    once we can see the real transition (what code, held for how many calls, lasting how long) for
    each trigger, the next fix can be designed against the real mechanism instead of a guess.
 
-## Verification so far (2026-10-10)
+## Verification so far (2026-10-11)
 
 - Both patches (`direct2d-frame-latency-wait.patch` then `direct2d-present-diagnostic.patch`)
   apply cleanly in sequence to a fresh JUCE 9.0.3 checkout, verified via a real `git apply`
   against an independent clone -- not just `--check`.
-- The diagnostic hook's call site and symbols were confirmed present in the actually-patched
-  source afterwards (grepped the patched file directly, not just the patch text).
+- Also re-verified through a real CMake `FetchContent` configure (not just `git apply`), which
+  actually fetches JUCE 9.0.3 and runs both patches through its own populate+patch step.
+- Both probes' call sites and symbols (`onPresent1Result`, `onPresent1TestResult`, the
+  `DXGI_PRESENT_TEST` call) were confirmed present in the actually-fetched, patched source
+  afterwards (grepped the patched file directly, not just the patch text), with patch 1's
+  original `if (hr == S_OK) swap.didPresent();` control flow confirmed untouched alongside them.
 - The patched file is fully CRLF, matching JUCE's own convention, with no bare LF lines introduced.
 - **Not yet done, same as every prior round: not compiled (Windows/Direct2D-only file, no Windows
   environment available here), and not run against the real triggers.** That's the whole point of

@@ -1,8 +1,8 @@
 diff --git a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
-index e92f36c..0153e8e 100644
+index e92f36c..cd8c344 100644
 --- a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
 +++ b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
-@@ -32,6 +32,110 @@
+@@ -32,6 +32,145 @@
    ==============================================================================
  */
  
@@ -15,13 +15,29 @@ index e92f36c..0153e8e 100644
 +// Microsoft's own docs say that code is never returned for a flip-model swap
 +// chain, which is what this file creates -- so the real code is currently
 +// unknown). Purely observational: does not change canPresent()/didPresent() or
-+// any control flow. Logs every time Present1()'s returned HRESULT changes,
++// any control flow. Logs every time either probe's returned HRESULT changes,
 +// with a timestamp and how long the previous value held, to
 +// %TEMP%\d2d_present_diagnostic.log (and mirrored to OutputDebugStringA for
 +// anyone watching with a debugger/DebugView attached).
 +//
-+// Remove this whole block, and its one call site in Pimpl::paint() below,
-+// once real values have been captured.
++// Two probes are logged, independently, under their own labels:
++//   - "Present1 normal": the real present this file already makes (submits the painted
++//     frame). Its result and flags are unchanged from before -- this is the call that actually
++//     drives rendering.
++//   - "Present1 test": a SECOND call, added 2026-10-11, made immediately after the real one on
++//     every paint, using DXGI_PRESENT_TEST (0 sync interval, no frame submitted -- Microsoft's
++//     own documented way to check presentability without presenting:
++//     https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiswapchain-present).
++//     Its result is logged and otherwise discarded -- nothing downstream reacts to it -- so it
++//     cannot change behaviour, only add a second, independent data point for whatever is
++//     happening to presentability at the same moment. This matters because no fix in this
++//     project currently calls DXGI_PRESENT_TEST at all (an earlier "occlusion-standby" design
++//     that would have was deliberately kept out of this diagnostic build), so without this
++//     second probe there would be nothing here to show what a test-present reports during an
++//     occluded/transitioning period.
++//
++// Remove this whole block, and its two call sites in Pimpl::paint() below, once real values
++// have been captured.
 +#include <cstdio>
 +#include <cstdint>
 +#include <chrono>
@@ -63,49 +79,68 @@ index e92f36c..0153e8e 100644
 +        }
 +    }
 +
-+    inline void onPresent1Result (HRESULT hr) noexcept
++    // Per-probe state, so the "normal" and "test" probes are tracked (and logged) completely
++    // independently -- one probe's transitions never reset or interfere with the other's.
++    struct Tracker
 +    {
-+        static HRESULT lastHr = S_OK;
-+        static std::uint32_t countSinceTransition = 0;
-+        static auto lastTransitionTime = std::chrono::steady_clock::now();
-+        static bool first = true;
++        HRESULT lastHr = S_OK;
++        std::uint32_t countSinceTransition = 0;
++        std::chrono::steady_clock::time_point lastTransitionTime = std::chrono::steady_clock::now();
++        bool first = true;
++    };
 +
-+        ++countSinceTransition;
++    inline void record (const char* label, HRESULT hr, UINT syncInterval, UINT flags, Tracker& tracker) noexcept
++    {
++        ++tracker.countSinceTransition;
 +
-+        if (! first && hr == lastHr)
++        if (! tracker.first && hr == tracker.lastHr)
 +            return;
 +
 +        const auto now = std::chrono::steady_clock::now();
-+        const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds> (now - lastTransitionTime).count();
++        const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds> (now - tracker.lastTransitionTime).count();
 +
 +        SYSTEMTIME st;
 +        GetLocalTime (&st);
 +
-+        char line[384]{};
++        char line[448]{};
 +
-+        if (first)
++        if (tracker.first)
 +        {
 +            std::snprintf (line, sizeof (line),
-+                            "[%02u:%02u:%02u.%03u] D2D_DIAG start: hr=0x%08lX (%s)\n",
++                            "[%02u:%02u:%02u.%03u] D2D_DIAG [%s] start: hr=0x%08lX (%s) syncInterval=%u flags=0x%08X\n",
 +                            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-+                            (unsigned long) hr, decodeHresult (hr));
-+            first = false;
++                            label, (unsigned long) hr, decodeHresult (hr), syncInterval, flags);
++            tracker.first = false;
 +        }
 +        else
 +        {
 +            std::snprintf (line, sizeof (line),
-+                            "[%02u:%02u:%02u.%03u] D2D_DIAG transition: hr=0x%08lX (%s) held for %u calls (%lld ms) -> hr=0x%08lX (%s)\n",
++                            "[%02u:%02u:%02u.%03u] D2D_DIAG [%s] transition: hr=0x%08lX (%s) held for %u calls (%lld ms) -> hr=0x%08lX (%s) syncInterval=%u flags=0x%08X\n",
 +                            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-+                            (unsigned long) lastHr, decodeHresult (lastHr),
-+                            countSinceTransition, (long long) heldMs,
-+                            (unsigned long) hr, decodeHresult (hr));
++                            label,
++                            (unsigned long) tracker.lastHr, decodeHresult (tracker.lastHr),
++                            tracker.countSinceTransition, (long long) heldMs,
++                            (unsigned long) hr, decodeHresult (hr),
++                            syncInterval, flags);
 +        }
 +
 +        logLine (line);
 +
-+        lastHr = hr;
-+        countSinceTransition = 0;
-+        lastTransitionTime = now;
++        tracker.lastHr = hr;
++        tracker.countSinceTransition = 0;
++        tracker.lastTransitionTime = now;
++    }
++
++    inline void onPresent1Result (HRESULT hr, UINT syncInterval, UINT flags) noexcept
++    {
++        static Tracker tracker;
++        record ("Present1 normal", hr, syncInterval, flags, tracker);
++    }
++
++    inline void onPresent1TestResult (HRESULT hr) noexcept
++    {
++        static Tracker tracker;
++        record ("Present1 test", hr, 0, DXGI_PRESENT_TEST, tracker);
 +    }
 +}
 +// ========================= END DIAGNOSTIC LOGGING ==========================
@@ -113,12 +148,24 @@ index e92f36c..0153e8e 100644
  namespace juce
  {
  
-@@ -502,6 +606,9 @@ public:
+@@ -502,6 +641,21 @@ public:
          const auto hr = swap.getChain()->Present1 (swap.presentSyncInterval,
                                                     swap.presentFlags,
                                                     &params);
 +
-+        Direct2DPresentDiagnostic::onPresent1Result (hr);
++        Direct2DPresentDiagnostic::onPresent1Result (hr, swap.presentSyncInterval, swap.presentFlags);
++
++        {
++            // Second, purely observational probe (added 2026-10-11): a DXGI_PRESENT_TEST
++            // present-test call, run immediately after the real one above, to see what a
++            // test-present reports in parallel. It submits no frame of its own, and its result
++            // is only logged, never acted on -- it cannot change what happens next in this
++            // function. Run unconditionally (even if the real present above just failed) so a
++            // genuine failure's test-probe reading gets captured too, not just the normal case.
++            DXGI_PRESENT_PARAMETERS diagTestParams{};
++            const auto diagTestHr = swap.getChain()->Present1 (0, DXGI_PRESENT_TEST, &diagTestParams);
++            Direct2DPresentDiagnostic::onPresent1TestResult (diagTestHr);
++        }
 +
          if (FAILED (hr))
          {
