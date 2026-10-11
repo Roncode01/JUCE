@@ -17,28 +17,31 @@ include(FetchContent)
 # plugin's meter panels actually work).
 #
 # ============================================================================
-# THIS IS A DIAGNOSTIC BUILD, NOT A FIX CANDIDATE.
+# THIS IS THE V3 FIX CANDIDATE (first real fix attempt built on confirmed diagnostic data).
 # ============================================================================
-# Added 2026-10-10. Deliberately does NOT include direct2d-occlusion-didpresent.patch (the
-# second, not-yet-field-confirmed patch from the 1.20.0 candidate). That patch changes control
-# flow (unconditionally resets the present-throttle on any non-S_OK success code), which would
-# confound this build's purpose: finding out which actual HRESULT Present1() returns during
-# screensaver, lock-screen, hibernate, sleep and display-off transitions.
-#
-# Earlier analysis (both the original patch author's own comments and this project's own
-# reasoning) assumed the relevant code is DXGI_STATUS_OCCLUDED. A later review turned up that
-# Microsoft's own documentation states DXGI_STATUS_OCCLUDED is never returned for a flip-model
-# swap chain -- which is what this file's SwapChain actually creates (DXGI_SWAP_EFFECT_FLIP_
-# SEQUENTIAL). So the "it's occlusion" premise behind every fix attempt so far may simply be
-# wrong, and no further fix design should be trusted until the real HRESULT value(s) are known.
-#
-# direct2d-present-diagnostic.patch adds a small logging hook (Direct2DPresentDiagnostic::
-# onPresent1Result) called right after every real Present1() call, before any existing control
-# flow runs. It is purely observational -- it does not alter canPresent()/didPresent() or any
-# return value -- so this build is expected to still flicker under the same triggers as before
-# (screensaver, lock screen, hibernate). That's expected and not a regression: this build's only
-# job is to produce %TEMP%\d2d_present_diagnostic.log with the real HRESULT values logged across
-# those triggers. See README.md for what to do with that log.
+# Chain, in order:
+#   1. direct2d-frame-latency-wait.patch  -- the base patch (mixed-refresh-rate fix).
+#   2. direct2d-present-diagnostic.patch  -- kept in place deliberately (not removed for this
+#      round): logs every Present1() result under "Present1 normal" and a parallel
+#      DXGI_PRESENT_TEST probe under "Present1 test", to %TEMP%\d2d_present_diagnostic.log. Still
+#      useful here to confirm this build behaves as expected -- see README.md for what the log
+#      will and won't show once this patch is also active (paint() stops running while occluded,
+#      so the log goes quiet during standby itself; that's expected, not a bug).
+#   3. direct2d-occlusion-standby-v3.patch -- the actual fix, now built on confirmed data rather
+#      than a guess. The 2026-10-11 diagnostic run on this exact build showed the real HRESULT
+#      is DXGI_STATUS_OCCLUDED for all three flicker triggers (screensaver, lock screen,
+#      hibernate), and that a DXGI_PRESENT_TEST probe tracks real recovery accurately for all
+#      three. This patch adds an explicit occluded/standby state to SwapChain: on any non-S_OK
+#      success (confirmed to be DXGI_STATUS_OCCLUDED here), it stops presenting for real and
+#      polls via DXGI_PRESENT_TEST until recovery, instead of either (a) disabling the
+#      present-throttle outright (the first, flawed fix -- risks a lost frame-latency semaphore
+#      count) or (b) leaving it latched "unlocked" indefinitely (patch 1 alone -- the original
+#      screensaver/lock/hibernate bug). "v3" (vs. the "v2" design reviewed earlier) adds one
+#      narrow fix on top of that design, caught on review: the recovery poll itself can return a
+#      genuine failure (e.g. DXGI_ERROR_DEVICE_REMOVED), which is not occlusion and should not be
+#      treated as "still occluded, keep polling forever" -- v3 exits standby on a real failure so
+#      the next real Present1 attempt's own existing FAILED(hr) handling deals with it, rather
+#      than hanging. See README.md for the full detail and what's still open after this.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        9.0.3
@@ -46,32 +49,24 @@ FetchContent_Declare(JUCE
     PATCH_COMMAND  git apply --whitespace=nowarn
                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-frame-latency-wait.patch" &&
                    git apply --whitespace=nowarn
-                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-present-diagnostic.patch")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-present-diagnostic.patch" &&
+                   git apply --whitespace=nowarn
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-occlusion-standby-v3.patch")
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(D2DReproVst3
     COMPANY_NAME               "Your Company"
     PLUGIN_MANUFACTURER_CODE   Yrco
-    PLUGIN_CODE                D2dg        # distinct from D2DReproVst3's other build (D2dr) and
-                                            # the main plugin (Spba). PRODUCT_NAME below is
-                                            # unchanged, so this still produces the same-named
-                                            # .vst3 bundle and will replace whichever D2DReproVst3
-                                            # build is currently installed -- this code just keeps
-                                            # REAPER's own plugin-identity tracking (FX chains,
-                                            # saved projects referencing this slot) distinct from
-                                            # the other build's, the same way swapping 1.19.0 for
-                                            # 1.20.0 already works for the main plugin.
-    BUNDLE_ID                  com.yourcompany.d2dreprovst3.diagnostic
-    PRODUCT_NAME               "D2D Repro VST3"   # deliberately unchanged from the other
-                                            # D2DReproVst3 builds -- this is what controls the
-                                            # built .vst3 bundle's filename on disk, and your CI
-                                            # workflow's Copy-Item step has that filename
-                                            # hardcoded. Changing it (as an earlier version of
-                                            # this file did) breaks that copy step with "Cannot
-                                            # find path". PLUGIN_CODE and BUNDLE_ID above are
-                                            # what actually keep this installing side-by-side
-                                            # with your other builds, so nothing is lost by
-                                            # leaving this alone.
+    PLUGIN_CODE                D2dv        # distinct from the diagnostic-only build (D2dg), the
+                                            # other D2DReproVst3 build (D2dr), and the main plugin
+                                            # (Spba) -- for REAPER's own plugin-identity tracking.
+                                            # PRODUCT_NAME below is deliberately unchanged (same
+                                            # reasoning as the diagnostic build -- your CI's
+                                            # Copy-Item step has that filename hardcoded), so this
+                                            # still replaces whichever D2DReproVst3 build is
+                                            # currently installed.
+    BUNDLE_ID                  com.yourcompany.d2dreprovst3.v3standby
+    PRODUCT_NAME               "D2D Repro VST3"
     FORMATS                    VST3
     VST3_CATEGORIES            Fx Tools
     IS_SYNTH                   FALSE
