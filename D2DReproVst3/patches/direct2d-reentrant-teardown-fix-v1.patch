@@ -100,7 +100,7 @@ index 5e5e5e0..7ca8f9e 100644
  
      std::vector<std::unique_ptr<Direct2DGraphicsContext::SavedState>> savedClientStates;
 diff --git a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
-index c776e81..6830046 100644
+index c776e81..9fa8f80 100644
 --- a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
 +++ b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
 @@ -482,6 +482,70 @@ public:
@@ -174,37 +174,46 @@ index c776e81..6830046 100644
  private:
      CompositionTree() = default;
  
-@@ -491,6 +555,29 @@ private:
- };
- 
- //==============================================================================
-+// RAII wrapper for Pimpl::enterReentrancyGuard()/leaveReentrancyGuard() (see the comment on
-+// enterReentrancyGuard() in juce_Direct2DGraphicsContextImpl_windows.h for why this guard
-+// exists). Used below to bracket prepare() -- which can be called standalone from
-+// handleShowWindow(), as well as nested inside startFrame() -- so every return path releases
-+// the guard without needing to touch each of prepare()'s existing early returns individually.
-+struct ScopedReentrancyGuard
-+{
-+    explicit ScopedReentrancyGuard (Direct2DGraphicsContext::Pimpl& p) : pimpl (p)
-+    {
-+        pimpl.enterReentrancyGuard();
-+    }
-+
-+    ~ScopedReentrancyGuard()
-+    {
-+        pimpl.leaveReentrancyGuard();
-+    }
-+
-+    Direct2DGraphicsContext::Pimpl& pimpl;
-+
-+    ScopedReentrancyGuard (const ScopedReentrancyGuard&) = delete;
-+    ScopedReentrancyGuard& operator= (const ScopedReentrancyGuard&) = delete;
-+};
-+
+@@ -494,6 +558,38 @@ private:
  struct Direct2DHwndContext::HwndPimpl : public Pimpl
  {
  private:
-@@ -507,6 +594,12 @@ private:
++    // RAII wrapper for enterReentrancyGuard()/leaveReentrancyGuard() (inherited from Pimpl --
++    // see the comment on enterReentrancyGuard() in juce_Direct2DGraphicsContextImpl_windows.h
++    // for why this guard exists). Used below to bracket prepare() -- which can be called
++    // standalone from handleShowWindow(), as well as nested inside startFrame() -- so every
++    // return path releases the guard without needing to touch each of prepare()'s existing
++    // early returns individually.
++    //
++    // Deliberately nested *inside* HwndPimpl, rather than declared at namespace scope: Pimpl is
++    // a *protected* nested type of Direct2DGraphicsContext (see
++    // juce_Direct2DGraphicsContext_windows.h), so only Direct2DGraphicsContext's own hierarchy
++    // -- which HwndPimpl is part of, via "struct HwndPimpl : public Pimpl" -- can even name that
++    // type. A free-standing struct outside that hierarchy can't, which is exactly what failed
++    // to compile here first time round (MSVC C2248). Taking a HwndPimpl& instead of a Pimpl&
++    // avoids needing to spell out the protected type at all.
++    struct ScopedReentrancyGuard
++    {
++        explicit ScopedReentrancyGuard (HwndPimpl& p) : pimpl (p)
++        {
++            pimpl.enterReentrancyGuard();
++        }
++
++        ~ScopedReentrancyGuard()
++        {
++            pimpl.leaveReentrancyGuard();
++        }
++
++        HwndPimpl& pimpl;
++
++        ScopedReentrancyGuard (const ScopedReentrancyGuard&) = delete;
++        ScopedReentrancyGuard& operator= (const ScopedReentrancyGuard&) = delete;
++    };
++
+     HWND hwnd;
+     SwapChain swap;
+     ComSmartPtr<ID2D1DeviceContext1> deviceContext;
+@@ -507,6 +603,12 @@ private:
  
      bool prepare() override
      {
@@ -217,7 +226,7 @@ index c776e81..6830046 100644
          const auto adapter = getDefaultAdapter();
  
          if (adapter == nullptr)
-@@ -657,12 +750,25 @@ public:
+@@ -657,12 +759,25 @@ public:
  
      SavedState* startFrame() override
      {
@@ -243,7 +252,7 @@ index c776e81..6830046 100644
  
          JUCE_TRACE_LOG_D2D_PAINT_CALL (etw::direct2dHwndPaintStart, getFrameId());
  
-@@ -674,6 +780,10 @@ public:
+@@ -674,6 +789,10 @@ public:
          const auto result = Pimpl::finishFrame();
          present();
          lastFinishFrameTicks = Time::getHighResolutionTicks();

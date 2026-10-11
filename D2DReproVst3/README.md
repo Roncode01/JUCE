@@ -76,6 +76,39 @@ Both parts are additive and inert for anything other than `HwndPimpl`/`Compositi
 guard counter defaults to zero, so any other `Pimpl` subclass that never calls
 `enterReentrancyGuard()` behaves exactly as before.
 
+## Build fix (2026-10-11, second pass)
+
+The first version of this patch failed to compile on your CI with MSVC error C2248
+("cannot access protected struct"), on two lines inside `juce_Direct2DHwndContext_windows.cpp`.
+Cause: the `ScopedReentrancyGuard` RAII helper (the thing that calls `enterReentrancyGuard()`/
+`leaveReentrancyGuard()` around `prepare()`) was originally written as a free-standing struct at
+namespace scope, and its constructor/member referred to `Direct2DGraphicsContext::Pimpl&`.
+`Pimpl` is forward-declared under a `protected:` access specifier inside `Direct2DGraphicsContext`
+(see `juce_Direct2DGraphicsContext_windows.h`) -- so code outside that class's own hierarchy can't
+even *name* the type, regardless of whether the specific methods being called on it
+(`enterReentrancyGuard`/`leaveReentrancyGuard`) are themselves public. `HwndPimpl` itself can name
+`Pimpl` fine, because it's declared as `struct HwndPimpl : public Pimpl` -- nested classes of a
+derived class share that derived class's protected-access rights.
+
+Fix: `ScopedReentrancyGuard` is now a private struct nested *inside* `HwndPimpl`, and its
+constructor/member take `HwndPimpl&` instead of `Direct2DGraphicsContext::Pimpl&` -- so it never
+needs to spell out the protected type at all; it just calls the (public) guard methods, inherited
+into `HwndPimpl`, directly on the reference it's given. Functionally identical, just relocated so
+it's legal C++.
+
+This patch file has been replaced with the corrected version. The CMakeLists.txt chain, the other
+three patches, and everything else in this package are unchanged.
+
+Re-verified the same way as before (fresh independent clone, `git apply` of all four patches in
+sequence, plus a real CMake `FetchContent` configure) -- both now succeed, and the previously
+reported `fopen` warning (`C4996`, from the diagnostic patch, line ~100) is unrelated and harmless;
+it's a pre-existing warning from `direct2d-present-diagnostic.patch`, not an error, and not touched
+here. **Important caveat: neither `git apply` nor CMake's configure step invokes a compiler, so
+this verification could not have caught the C2248 error in the first place -- only your actual
+Windows/MSVC build did, which is what caught it.** This correction fixes the specific error you
+reported; it is not a guarantee no other compile issue remains, since nothing on this end can
+actually compile Direct2D/Windows code. Your next build is still the real test.
+
 ## What this should do under test
 
 The crash/freeze from unplugging a monitor, or reshuffling windows across two monitors when one
