@@ -1,94 +1,146 @@
-# D2D Repro VST3 -- v3 fix candidate
+# D2D Repro VST3 -- v5 (adds the monitor-unplug crash + ghost-window fix)
 
-This is the first real fix attempt built on **confirmed** data rather than a guess. Stage 1 of
-two: this patch targets the screensaver/lock-screen/hibernate flicker specifically. The separate
-monitor-unplug crash/freeze you found is stage 2 -- not addressed here, see "What this does NOT
-fix" below.
+Stage 2 of the investigation: this build adds a fix for two separate, pre-existing JUCE defects
+-- the crash/freeze you hit when unplugging a monitor (or reshuffling windows across monitors),
+and the window-shaped "ghost" outline that could persist even after closing the host DAW -- on
+top of everything v3 already confirmed working ("no flickering observed" on screensaver/lock/
+hibernate). That fix is untouched here.
 
-## Why this design, now
+## What this is fixing
 
-The 2026-10-11 diagnostic run (on the previous build, patch 1 + logging only) showed:
+Not the same bug as v3. v3 fixed a flicker caused by `DXGI_STATUS_OCCLUDED` being returned from
+`Present1()` -- a clean, documented success code the un-patched throttle logic mishandled. This
+is two different failures, both traced to the same root cause by reading JUCE's own
+adapter-management code (`DxgiAdapters`, `Direct2DGraphicsContext::Pimpl`,
+`Direct2DHwndContext::HwndPimpl` -- all stock, unpatched JUCE 9.0.3, untouched by any of this
+investigation's earlier patches):
 
-| Trigger | Real HRESULT | `DXGI_PRESENT_TEST` probe |
-|---|---|---|
-| Screensaver | `DXGI_STATUS_OCCLUDED` (`0x087A0001`) | tracked it exactly |
-| Lock screen | `DXGI_STATUS_OCCLUDED` | tracked it exactly |
-| Hibernate | `DXGI_STATUS_OCCLUDED` | tracked it exactly |
-| Sleep | never occluded (no `Present1` calls at all) | -- |
-| Display off | never occluded | -- |
+1. Unplugging a monitor (or any display-topology change) makes Windows send `WM_DISPLAYCHANGE`/
+   `WM_SETTINGCHANGE` to top-level windows, which JUCE's window proc turns into a call to
+   `DxgiAdapters::updateAdapters()`. That tears down and rebuilds the Direct2D device/swap-chain/
+   composition state for every window whose current adapter no longer matches, via
+   `adapterCreated()`/`adapterRemoved()` calling `teardown()`.
+2. Critically, `WM_DISPLAYCHANGE`/`WM_SETTINGCHANGE` are delivered with `SendMessage` -- a *sent*
+   message, not a posted one. If this thread happens to be blocked inside a call that
+   synchronises with the DWM -- `IDXGISwapChain::ResizeBuffers`, `IDXGISwapChain1::Present1`,
+   `IDCompositionDevice::Commit`, all reachable from one ordinary paint cycle -- Windows can
+   deliver that sent message *reentrantly*, nested inside the very call that's still using this
+   object's Direct2D/DXGI members.
+3. `teardown()` had no guard against this. It nulls out the device context and swap chain with
+   no regard for whether a call higher up the same thread's stack is still holding and about to
+   use those same members -- a null-pointer dereference. That's the crash.
+4. Separately: `teardown()` also only ever dropped this process's own COM references to the
+   DirectComposition visual/target, with no explicit "detach content, then commit the empty
+   state" step first. `CreateTargetForHwnd`'s target isn't purely an app-side object -- it's tied
+   to the window at the OS/compositor level -- so simply releasing references doesn't guarantee
+   the DWM stops showing the last frame it was told to display. An incomplete teardown (made
+   more likely by the same reentrancy above) could leave a static outline on screen that outlives
+   the window and even the process, clearing only once Windows itself restarts.
 
-So the "occlusion-standby" design floated a few rounds back -- detect occlusion, stop presenting
-for real, poll with `DXGI_PRESENT_TEST` until it clears -- is no longer a guess about which
-HRESULT occurs or whether the test probe is trustworthy here. Both are confirmed, for exactly the
-triggers that matter.
+Both would happen identically in a completely unpatched JUCE 9.0.3 app, with none of this
+investigation's other patches applied. I checked whether either was already a known, fixed JUCE
+bug; neither is. There's one related-but-different, already-fixed 2024 bug (an unchecked null
+DXGI factory -- see https://forum.juce.com/t/br-decent-number-of-crashes-in-vblankdispatcher-reconfiguredisplays-on-customer-machines/60917),
+already present as a null check in the 9.0.3 source. Both of these are separate from that and,
+as far as I could find, unreported.
 
-## What changed from patch 1 alone
+## The fix
 
-`SwapChain::didPresent()` now takes the `HRESULT`:
+`direct2d-reentrant-teardown-fix-v1.patch` -- its own fix lineage, not a successor to the
+occlusion-standby versions -- adds two things:
 
-- `S_OK` -- reset the present-throttle (`didWait = false`) exactly as before.
-- Any other success code (confirmed to be `DXGI_STATUS_OCCLUDED` here) -- leave the throttle
-  alone and set `occluded = true`. `canPresent()` then stops attempting real presents and calls
-  `pollForRecovery()` instead, every readiness check, until it confirms recovery.
+- **A reentrancy guard.** `Direct2DGraphicsContext::Pimpl` gains `enterReentrancyGuard()`/
+  `leaveReentrancyGuard()` (a nesting counter, plus a `teardownDeferred` flag).
+  `adapterCreated()`/`adapterRemoved()` now check the counter before calling `teardown()`: if
+  it's held, they set `teardownDeferred = true` and return instead of tearing anything down
+  immediately; `teardown()` runs for real the moment the guard is released, at a point where
+  nothing is still using the members it resets. `Direct2DHwndContext::HwndPimpl` holds that
+  guard across `prepare()` (via a small RAII wrapper, so every one of `prepare()`'s existing
+  early-return paths releases it correctly) and across the whole `startFrame()` .. `finishFrame()`
+  span (a manual matched enter/leave, since they're two separate calls) -- covering
+  `setSize()`'s `ResizeBuffers`, `BeginDraw`/`EndDraw`, everything your UI draws in between, and
+  `present()`'s `Present1()` call.
+- **An explicit composition-teardown sequence.** `CompositionTree` now has a real destructor:
+  `SetContent(nullptr)` -> `SetRoot(nullptr)` -> `Commit()`, before its COM references are
+  released. One subtlety this required: `CompositionTree::create()` returns its local `result`
+  by value into a `std::optional`, and `ComSmartPtr` (JUCE's COM wrapper) has no move
+  constructor of its own -- only copy. With a real destructor now attached, a copy there would
+  leave both the returned object and the about-to-be-destroyed local pointing at the same
+  underlying composition objects, and the local's destructor would immediately clear the content
+  it had just set up. `CompositionTree` now has a hand-written move constructor/assignment
+  (via `std::swap` on each member, which correctly nulls out the source) and its copy operations
+  are explicitly deleted, so this can't happen -- and any future accidental copy is a compile
+  error instead of a silent bug.
 
-`pollForRecovery()` calls `Present1(0, DXGI_PRESENT_TEST, ...)` -- submits no frame, so it can't
-hit the "frame might never retire" problem a real present would. On `S_OK`, it exits standby and
-lets the very next real frame through immediately. **This is the one change from the design
-reviewed a few rounds back:** if the probe itself returns a genuine failure (`FAILED(hr)`, e.g.
-`DXGI_ERROR_DEVICE_REMOVED`) rather than "still occluded," it now exits standby instead of polling
-forever -- a real failure isn't occlusion, and looping on it would hang the editor rather than
-just flicker. The next real `Present1` attempt then runs normally and hits its own existing
-`FAILED(hr)` handling (unchanged, further down in `paint()`).
+Both parts are additive and inert for anything other than `HwndPimpl`/`CompositionTree`: the
+guard counter defaults to zero, so any other `Pimpl` subclass that never calls
+`enterReentrancyGuard()` behaves exactly as before.
 
-## Diagnostic logging -- kept in, with a caveat
+## What this should do under test
 
-`direct2d-present-diagnostic.patch` is still chained in, as asked, so you can see what's actually
-happening while testing this. One thing worth knowing: **the log will go quiet during standby
-itself.** Both logging probes live inside `paint()`, and `canPresent()` -- which gates whether
-`paint()` runs at all -- returns `false` while occluded (it's busy polling via
-`pollForRecovery()`, which isn't logged). So you'll see the log capture the moment occlusion
-begins, then nothing, then the moment it recovers and real painting resumes. That gap is expected
-under this patch, not a sign something broke -- it's the opposite of patch-1-alone's behaviour,
-where `paint()` kept running (and logging) the whole time because nothing was gating it.
-
-## What this build should do under test
-
-For screensaver, lock screen, and hibernate: **no flicker**, and no hang either (that's the thing
-being added beyond the earlier design). The editor should go quiet while occluded (no visible
-updates, which is correct -- there's nothing to update since the old frame is still valid) and
-resume cleanly on recovery.
+The crash/freeze from unplugging a monitor, or reshuffling windows across two monitors when one
+is unplugged, should no longer happen. The ghost outline that previously persisted even after
+closing the DAW should no longer appear (this one's harder to verify -- you'd need to watch for
+its absence specifically, not just crash/no-crash).
 
 ## What this does NOT fix
 
-Your two extra tests -- unplugging the monitor showing the FX window, single- and dual-monitor --
-produced crashes/freezes with no log entries at all, meaning whatever failed likely happened
-before `Present1` was even called again. That's a different code path entirely (display-topology
-change handling, not the swap-chain presentation logic this patch touches) and needs its own
-investigation -- that's stage 2, after you've confirmed this patch on the original five triggers.
+- **GPU device-removed/driver crash.** A separate, narrower issue. v3's `pollForRecovery()`
+  already stops it from hanging in an infinite standby loop, but there's still no real recovery
+  path -- it falls through to JUCE's existing `jassertfalse; return;` in `paint()`. Not touched
+  by this patch. (We looked at three possible app-level mitigations for this -- triggering
+  `updateAdapters()` on failure, a `Desktop::Displays::Listener`, and a repaint watchdog -- and
+  concluded none of them actually reach the real point of failure: the shared `DxgiAdapter`'s
+  underlying D3D/D2D device, which only `DxgiAdapters::updateAdapters()` can rebuild, and that
+  function's own `IsCurrent()` guard most likely won't fire for a pure device-removed event with
+  no accompanying display-topology change. Left alone for now, per your call not to go near
+  swap-chain/device recreation code.)
+- **The adapter rebuild is still wholesale, not differential** -- unplugging one monitor in a
+  dual-monitor setup still tears down and rebuilds every window's Direct2D state, not just the
+  one actually affected. Harmless on its own, just unnecessary churn; not fixed here.
+- **A factory-creation failure during the rebuild can still leave the adapter list empty for a
+  while** if `CreateDXGIFactory2` fails at exactly the wrong moment -- though this one turns out
+  to be partly self-healing: `updateAdapters()`'s own guard means a failed factory doesn't block
+  a retry on the *next* display-settings event, whenever that happens to occur. No guaranteed
+  timing, but not permanently stuck either. Not fixed here.
 
 ## Verification so far (2026-10-11)
 
-- All three patches (`direct2d-frame-latency-wait.patch`, then `direct2d-present-diagnostic.patch`,
-  then `direct2d-occlusion-standby-v3.patch`) apply cleanly in sequence to a fresh JUCE 9.0.3
-  checkout, verified via a real `git apply` against an independent clone.
-- Also verified through a real CMake `FetchContent` configure (not just `git apply`) -- fetches
-  JUCE 9.0.3 and runs all three patches through its own populate+patch step.
-- All expected symbols (`occluded`, `pollForRecovery`, `didPresent (HRESULT)`, both diagnostic
-  probes) confirmed present in the actually-fetched, triple-patched source afterwards, read
-  directly to confirm the logic matches what's described above.
-- The patched file is fully CRLF, matching JUCE's own convention.
+- All four patches (`direct2d-frame-latency-wait.patch`, `direct2d-present-diagnostic.patch`,
+  `direct2d-occlusion-standby-v3.patch`, then `direct2d-reentrant-teardown-fix-v1.patch`) apply
+  cleanly in sequence to a fresh, independent JUCE 9.0.3 checkout -- verified via a real
+  `git apply` against a separate clone, under their final filenames.
+- `direct2d-reentrant-teardown-fix-v1.patch` was also confirmed to apply independently of the
+  other three -- on top of patch 1 alone, and even directly against completely stock, unpatched
+  JUCE 9.0.3 with nothing else applied. It doesn't depend on the occlusion-standby fix or the
+  diagnostic logging, and they don't depend on it, so it can be included or left out of a build's
+  patch chain on its own.
+- Also verified through a real CMake `FetchContent` configure (fetches JUCE 9.0.3 over the
+  network and runs all four patches through its own populate+patch step, not just a dry-run
+  `git apply --check`).
+- All expected symbols confirmed present in the actually-fetched, four-patch source afterwards,
+  read directly: `enterReentrancyGuard`, `leaveReentrancyGuard`, `reentrancyGuardCount`,
+  `teardownDeferred` in the patched header; the guard checks in `adapterCreated()`/
+  `adapterRemoved()`; `ScopedReentrancyGuard` and both guard call sites in `HwndPimpl`; the
+  `CompositionTree` destructor, move constructor/assignment, and deleted copy operations. The v3
+  occlusion-standby symbols (`occluded`, `pollForRecovery`, etc.) are also still present and
+  unmodified.
+- The patched files are fully CRLF, matching JUCE's own convention.
 - **Not yet done, same as every round before it: not compiled (no Windows environment here), and
-  not run against the real triggers.** That's what this build is for.
+  not run against a real monitor-unplug.** This is a reasoned fix for a reentrancy/cleanup defect
+  found by reading the code -- I don't have a crash dump confirming which exact call pumps the
+  reentrant message on your machine, so treat this as a strong, well-evidenced hypothesis fix,
+  not a lab-confirmed one, until you've actually reproduced the unplug under this build.
 
 ## How to test
 
 1. Build and install exactly like the other D2DReproVst3 builds. Same bundle filename as the
-   other builds (by design, so your CI's `Copy-Item` step still works) -- this replaces whichever
-   one is currently installed.
-2. Clear `%TEMP%\d2d_present_diagnostic.log` first if you want a clean run.
-3. Run through screensaver, lock screen, and hibernate again. Confirm: no flicker, no hang, log
-   shows the expected quiet gap during each occlusion period.
-4. If you want to also probe the device-loss path this round added handling for, that's harder to
-   trigger deliberately (it needs an actual GPU driver reset/removal) -- not expected to be
-   testable on demand, just defended against now.
-5. Leave the monitor-unplug tests for stage 2.
+   others (by design) -- this replaces whichever one is currently installed.
+2. Re-run the screensaver/lock-screen/hibernate triggers first, to confirm nothing regressed from
+   v3 (should still show no flicker).
+3. Then try the monitor-unplug / dual-monitor-reshuffle scenario that crashed/froze before. Note
+   whether it crashes, freezes, or recovers, and whether any ghost outline remains after closing
+   the plugin/host. If it still misbehaves, the diagnostic log
+   (`%TEMP%\d2d_present_diagnostic.log`) plus whatever Windows Event Viewer / crash dump you can
+   get would help narrow down whether it's hitting a different path than the one this patch
+   guards.
