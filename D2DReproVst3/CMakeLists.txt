@@ -15,31 +15,28 @@ include(FetchContent)
 # already confirmed to eliminate the flicker in the VBlankAttachment variant of this repro.
 #
 # ============================================================================
-# THIS IS THE "v2" OCCLUSION-STANDBY TEST BUILD -- deliberately minimal, to isolate one specific
-# question from a regression report: v3 (direct2d-occlusion-standby-v3.patch, in the other
-# D2DReproVst3 builds) showed the screensaver/lock-screen flicker returning, with or without the
-# separate reentrant-teardown-fix-v1 patch. This build removes everything except the two patches
-# below -- no diagnostic logging patch, no teardown/reentrancy-guard patch -- to test the
-# occlusion-standby design itself ("v2": direct2d-occlusion-standby.patch, the analysis-only
-# revision that was never previously built/tested) in isolation, as close as possible to v1
-# (direct2d-occlusion-didpresent.patch), which IS already deployed in the real plugin
-# (StereoSplitBandPhaseAdjuster 1.20.0) and does not flicker on lock/screensaver there.
+# THIS IS THE "v1" TEST BUILD -- direct2d-occlusion-didpresent.patch, the fix that's actually
+# deployed in the real plugin (StereoSplitBandPhaseAdjuster 1.20.0) and does NOT flicker there on
+# screensaver/lock-screen. It has never been built against D2DReproVst3 before now.
 #
-# v2 vs v3: functionally identical for a plain screensaver/lock-screen occlusion (both gate real
-# presents on a literal hr == S_OK and poll via DXGI_PRESENT_TEST while occluded). v3 only adds
-# handling for a genuine FAILED(hr) seen *during* that poll (clearing the occluded flag so the
-# next real present's own failure path runs, instead of polling forever against a code that can
-# never return S_OK) -- a case a plain lock/unlock shouldn't hit. So this build should behave the
-# same as v3 for this specific scenario; if it doesn't flicker here, that points at something in
-# the diagnostic or teardown patches (or their interaction) rather than the occlusion-standby
-# design itself; if it still flickers, the design itself (shared by v2 and v3) is implicated,
-# independent of anything either of those other patches do.
+# Why this matters: both later revisions of this fix -- "v2" (direct2d-occlusion-standby.patch)
+# and "v3" (direct2d-occlusion-standby-v3.patch) -- have now been built against D2DReproVst3 and
+# BOTH flickered on screensaver/lock-screen, even though v3 was earlier confirmed clean and v2
+# had never been tested before. v2 and v3 share the same "occluded flag + pollForRecovery()
+# standby loop" design; v1 does not share any of that -- it keeps presenting every frame exactly
+# as before, and only changes one thing: didPresent() (which just resets the present-throttle
+# flag) is now called on ANY success code Present1 returns, not only a literal S_OK. No
+# standby, no DXGI_PRESENT_TEST polling, no occluded state at all.
+#
+# This build isolates whether v1's much simpler fix, which is already proven not to flicker in
+# the real plugin, also doesn't flicker in the D2DReproVst3 harness -- or whether D2DReproVst3
+# itself behaves differently from the real plugin regardless of which patch is applied.
 #
 # Chain, in order:
-#   1. direct2d-frame-latency-wait.patch -- the base patch (mixed-refresh-rate fix). Unchanged.
-#   2. direct2d-occlusion-standby.patch  -- "v2". NOT the same file as
-#      direct2d-occlusion-standby-v3.patch used elsewhere -- see the comment above for the one
-#      functional difference. Never previously built into any D2DReproVst3 before this.
+#   1. direct2d-frame-latency-wait.patch     -- the base patch (mixed-refresh-rate fix). Unchanged.
+#   2. direct2d-occlusion-didpresent.patch   -- "v1". Byte-for-byte the same patch file already
+#      shipped in the real plugin build (v1_20_0/patches/), just applied here against
+#      D2DReproVst3 for the first time.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        9.0.3
@@ -47,21 +44,22 @@ FetchContent_Declare(JUCE
     PATCH_COMMAND  git apply --whitespace=nowarn
                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-frame-latency-wait.patch" &&
                    git apply --whitespace=nowarn
-                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-occlusion-standby.patch")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-occlusion-didpresent.patch")
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(D2DReproVst3
     COMPANY_NAME               "Your Company"
     PLUGIN_MANUFACTURER_CODE   Yrco
-    PLUGIN_CODE                D2dw        # distinct from the diagnostic-only build (D2dg), the
-                                            # v3-standby build (D2dv), the v5 reentrant-teardown
-                                            # build (D2d5), the v5-diagnostic build (D2d6), and
-                                            # the main plugin (Spba) -- for REAPER's own
-                                            # plugin-identity tracking. PRODUCT_NAME below is
-                                            # deliberately unchanged (your CI's Copy-Item step has
-                                            # that filename hardcoded), so this still replaces
+    PLUGIN_CODE                D2d1        # distinct from the diagnostic-only build (D2dg), the
+                                            # v2-standby-test build (D2dw), the v3-standby build
+                                            # (D2dv), the v5 reentrant-teardown build (D2d5), the
+                                            # v5-diagnostic build (D2d6), and the main plugin
+                                            # (Spba) -- for REAPER's own plugin-identity
+                                            # tracking. PRODUCT_NAME below is deliberately
+                                            # unchanged (your CI's Copy-Item step has that
+                                            # filename hardcoded), so this still replaces
                                             # whichever D2DReproVst3 build is currently installed.
-    BUNDLE_ID                  com.yourcompany.d2dreprovst3.v2standbytest
+    BUNDLE_ID                  com.yourcompany.d2dreprovst3.v1didpresenttest
     PRODUCT_NAME               "D2D Repro VST3"
     FORMATS                    VST3
     VST3_CATEGORIES            Fx Tools

@@ -1,64 +1,63 @@
-# D2D Repro VST3 -- v2 occlusion-standby test (minimal, no diagnostic, no teardown fix)
+# D2D Repro VST3 -- v1 occlusion fix test (direct2d-occlusion-didpresent.patch)
 
-A deliberately stripped-down build, to isolate one specific question raised by the regression
-report: the v3 build (`direct2d-occlusion-standby-v3.patch`, used in all the other D2DReproVst3
-packages) showed the screensaver/lock-screen flicker you'd previously confirmed fixed coming
-back -- and it came back whether or not the separate `direct2d-reentrant-teardown-fix-v1.patch`
-was also applied.
+Both later revisions of the occlusion fix -- "v2" (`direct2d-occlusion-standby.patch`) and "v3"
+(`direct2d-occlusion-standby-v3.patch`) -- have now been built against D2DReproVst3 and **both
+flickered** on screensaver/lock-screen, even though v3 had earlier tested clean and v2 had never
+been tested before. v2 and v3 share the same design: an explicit `occluded` flag, with
+`canPresent()` stopping real presents entirely while occluded and polling recovery via a cheap
+`DXGI_PRESENT_TEST` call instead.
 
-This build keeps only the two patches below. No diagnostic-logging patch, no teardown/
-reentrancy-guard patch:
+v1 -- `direct2d-occlusion-didpresent.patch` -- doesn't share any of that design, and it's the
+one actually deployed in the real plugin (StereoSplitBandPhaseAdjuster 1.20.0), where it does
+not flicker on lock/screensaver. It has never been built against D2DReproVst3 before now.
+
+## What v1 actually does
+
+Much simpler than v2/v3: no standby state, no polling, no occlusion flag. It keeps attempting a
+real present every frame, exactly as stock JUCE already did. The only change: `didPresent()`
+(which just resets the present-throttle flag, `didWait = false`) is now called whenever
+`Present1` returns *any* success code, not only a literal `S_OK`. The original code checked
+`hr == S_OK` specifically, which left the throttle flag stuck `true` for the entire occluded
+period (since `canPresent()` short-circuits on that flag without waiting) -- silently
+re-opening the original un-throttled race this patch set out to fix in the first place, until
+the editor was closed and reopened.
+
+## Why build this
+
+To isolate one variable at a time. v1 and v2/v3 differ in exactly the respect described above.
+If this build:
+
+- **Doesn't flicker** -- that confirms the standby/polling design itself (shared by v2 and v3)
+  is what's causing the regression in D2DReproVst3, and the simpler always-present approach
+  (already proven in the real plugin) is the way to go for this repro too.
+- **Still flickers** -- that would mean something about D2DReproVst3 itself (as opposed to the
+  real plugin) produces this flicker regardless of which occlusion patch is applied, which is a
+  different and more fundamental finding -- it would mean the repro app isn't equivalent to the
+  real plugin for this specific test, and the next step would be figuring out what differs
+  between them (hosting context, window creation path, timer-driven paint cadence, etc.)
+  rather than continuing to compare patch revisions.
+
+## Chain
 
 1. `direct2d-frame-latency-wait.patch` -- the base patch. Unchanged from every other build.
-2. `direct2d-occlusion-standby.patch` -- **this is "v2"**, not the same file as
-   `direct2d-occlusion-standby-v3.patch` used elsewhere. It's the corrected-but-never-built
-   revision from the chat history: an explicit `occluded`/`pollForRecovery()` design (same shape
-   as v3), written up as analysis only and never actually wired into a D2DReproVst3 build or
-   tested until now.
-
-## Why this specific combination
-
-`direct2d-occlusion-didpresent.patch` -- call it v1 -- is what's actually deployed in the real
-plugin (StereoSplitBandPhaseAdjuster 1.20.0), and it does not flicker there on lock/screensaver.
-v2 and v3 both superseded v1 because v1 had a theoretical flaw (treating any non-`FAILED` result,
-including `DXGI_STATUS_OCCLUDED`, as "safely consumed" -- risking a frame-latency wait that never
-gets satisfied). v2 and v3 are functionally identical to each other for a plain occlusion
-transition: both gate real presents on a literal `hr == S_OK` and poll via
-`Present1(0, DXGI_PRESENT_TEST, ...)` while occluded. The only difference is v3's extra handling
-for a genuine `FAILED(hr)` seen *during* that poll (v2 just stays in standby forever on any
-non-`S_OK` code, including a real failure; v3 clears the occluded flag on a real failure so the
-next real present's own existing failure-handling runs instead of polling forever) -- a case a
-plain lock/unlock shouldn't ever hit, since nothing's actually failing.
-
-So this build should behave identically to the v3 build for this scenario. What differs is
-everything *around* it: no diagnostic patch's extra per-frame `DXGI_PRESENT_TEST` probe, no
-reentrancy-guard code wrapping `prepare()`/`startFrame()`/`finishFrame()`, no composition-
-teardown destructor. If this build:
-
-- **Still flickers** -- that implicates the occlusion-standby design itself (shared by v2 and
-  v3), independent of the diagnostic or teardown patches or anything about how they interact
-  with it. Worth then comparing carefully against v1's simpler logic to see what actually
-  differs in practice, not just on paper.
-- **Doesn't flicker** -- that points at something in the diagnostic patch, the teardown patch,
-  or an interaction between either of them and the standby logic -- worth revisiting with that
-  narrowed down, rather than the standby design itself.
+2. `direct2d-occlusion-didpresent.patch` -- byte-for-byte the same file already shipped in the
+   real plugin's `v1_20_0/patches/` folder. Confirmed identical before packaging here.
 
 ## Verification so far (2026-10-12)
 
-- Both patches apply cleanly in sequence to a fresh JUCE 9.0.3 checkout (confirmed previously,
-  2026-10-10, and re-confirmed here).
+- Confirmed `direct2d-occlusion-didpresent.patch` here is byte-identical to the one in the
+  `v1_20_0` plugin build that's already deployed and confirmed not flickering.
+- Both patches apply cleanly in sequence to a fresh JUCE 9.0.3 checkout.
 - Verified through a real CMake `FetchContent` configure (fetches JUCE 9.0.3 over the network
   and runs both patches through its own populate+patch step).
-- `Source/` here is your own D2DReproVst3 app code, copied as-is from your repo -- unmodified.
-- **Not compiled** (no Windows environment here) and **not run against the real repro** -- same
-  standing limitation as every build in this project. This is purely to get a clean, minimal
-  binary in your hands to test against the lock-screen/screensaver scenario.
+- `Source/` is your own D2DReproVst3 app code, copied as-is from your repo -- unmodified, same
+  as every other D2DReproVst3 build.
+- **Not compiled** (no Windows environment here) and **not run against the real repro**, same
+  standing limitation as everything in this investigation.
 
 ## How to test
 
 1. Build and install exactly like the other D2DReproVst3 builds -- same `PRODUCT_NAME`, so it
    replaces whichever one is currently installed.
-2. Lock the screen / trigger the screensaver, same as the test that showed the regression.
-3. Note whether it flickers. If you still have the diagnostic patch's log file from a previous
-   build, a fresh `%TEMP%\d2d_present_diagnostic.log` won't be produced by this build (no
-   diagnostic patch here) -- so this round is a plain visual yes/no, not a log comparison.
+2. Lock the screen / trigger the screensaver.
+3. Note whether it flickers.
