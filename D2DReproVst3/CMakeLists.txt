@@ -17,11 +17,18 @@ include(FetchContent)
 # plugin's meter panels actually work).
 #
 # ============================================================================
-# THIS IS THE V5 BUILD -- adds a fix for the monitor-unplug/display-reshuffle crash and the
-# "ghost window" that could outlive even the host process, on top of everything v3 already
-# fixed (confirmed: "no flickering observed" on screensaver/lock/hibernate).
+# THIS IS A DIAGNOSTIC BUILD, NOT A FIX -- same as v5 (the reentrant-teardown-fix-v1 patch),
+# plus one extra, purely observational patch (#5 below) added because v3's own flicker returned
+# on a screensaver/lock-screen test, with or without patch #4 applied, even though patches #1-3
+# are byte-identical to the build you already confirmed clean. The Present1 diagnostic (patch
+# #2) shows the occlusion-standby logic in patch #3 behaving exactly as designed around that
+# event -- so patch #5 instruments the OTHER mechanism that can also run on a lock/unlock
+# (adapterCreated()/adapterRemoved() -> teardown(), the same reentrancy machinery patch #4
+# guards) to see whether THAT'S what's visibly flickering. See README.md.
 # ============================================================================
 # Chain, in order:
+#   (1-4 are identical to the v5 build; see README.md "What this is fixing" for the full
+#   reasoning behind each. New here is #5.)
 #   1. direct2d-frame-latency-wait.patch      -- the base patch (mixed-refresh-rate fix).
 #   2. direct2d-present-diagnostic.patch      -- kept in place; logs every Present1() result
 #      under "Present1 normal" and a parallel DXGI_PRESENT_TEST probe under "Present1 test", to
@@ -69,6 +76,11 @@ include(FetchContent)
 #      Neither of these touches SwapChain's create()/resize() logic at all -- no swap-chain
 #      recreation code here. See README.md for the full reasoning, what this still doesn't
 #      cover (the GPU-device-removed gap), and how to test.
+#   5. direct2d-adapter-change-diagnostic.patch -- NEW, diagnostic only, no behaviour change.
+#      Logs every time adapterCreated()/adapterRemoved() actually run teardown() (immediately,
+#      or deferred via leaveReentrancyGuard()) to the SAME %TEMP%\d2d_present_diagnostic.log file
+#      patch #2 already writes to, so the two can be read side by side and compared directly
+#      against the DXGI_STATUS_OCCLUDED timestamps already being captured there.
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
     GIT_TAG        9.0.3
@@ -80,21 +92,23 @@ FetchContent_Declare(JUCE
                    git apply --whitespace=nowarn
                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-occlusion-standby-v3.patch" &&
                    git apply --whitespace=nowarn
-                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-reentrant-teardown-fix-v1.patch")
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-reentrant-teardown-fix-v1.patch" &&
+                   git apply --whitespace=nowarn
+                   "${CMAKE_CURRENT_SOURCE_DIR}/patches/direct2d-adapter-change-diagnostic.patch")
 FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(D2DReproVst3
     COMPANY_NAME               "Your Company"
     PLUGIN_MANUFACTURER_CODE   Yrco
-    PLUGIN_CODE                D2d5        # distinct from the diagnostic-only build (D2dg), the
+    PLUGIN_CODE                D2d6        # distinct from the diagnostic-only build (D2dg), the
                                             # earlier D2DReproVst3 build (D2dr), the v3 standby
-                                            # build (D2dv), and the main plugin (Spba) -- for
-                                            # REAPER's own plugin-identity tracking. PRODUCT_NAME
-                                            # below is deliberately unchanged (your CI's
-                                            # Copy-Item step has that filename hardcoded), so this
-                                            # still replaces whichever D2DReproVst3 build is
-                                            # currently installed.
-    BUNDLE_ID                  com.yourcompany.d2dreprovst3.v5reentrantteardown
+                                            # build (D2dv), the v5 reentrant-teardown build
+                                            # (D2d5), and the main plugin (Spba) -- for REAPER's
+                                            # own plugin-identity tracking. PRODUCT_NAME below is
+                                            # deliberately unchanged (your CI's Copy-Item step has
+                                            # that filename hardcoded), so this still replaces
+                                            # whichever D2DReproVst3 build is currently installed.
+    BUNDLE_ID                  com.yourcompany.d2dreprovst3.v5diag
     PRODUCT_NAME               "D2D Repro VST3"
     FORMATS                    VST3
     VST3_CATEGORIES            Fx Tools

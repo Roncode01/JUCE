@@ -1,0 +1,124 @@
+diff --git a/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.cpp b/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.cpp
+index 9468e37..efb444c 100644
+--- a/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.cpp
++++ b/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.cpp
+@@ -35,6 +35,68 @@
+ namespace juce
+ {
+ 
++// ============================================================================
++// DIAGNOSTIC LOGGING (temporary, added 2026-10-12 -- not part of any real fix)
++//
++// The existing Present1 diagnostic (juce_Direct2DHwndContext_windows.cpp) showed the
++// occlusion-standby logic (DXGI_STATUS_OCCLUDED handling) behaving exactly as designed around a
++// screensaver/lock-screen event -- minimal real presents while occluded, clean recovery, no
++// hang -- yet a flicker was still observed on that same event. This means the Present1 path
++// isn't what's flickering; the next candidate is this file's own adapterCreated()/
++// adapterRemoved() -> teardown() path, which is a *separate* mechanism (triggered by
++// WM_DISPLAYCHANGE/WM_SETTINGCHANGE, which can also accompany a lock/unlock on some
++// driver/display configurations) that tears down and recreates the Direct2D device context,
++// swap chain and DirectComposition visual from scratch -- a plausible source of a visible
++// flicker with no relation to Present1's return code at all.
++//
++// Logs every time teardown() actually runs as a result of an adapter-change notification
++// (immediately, or deferred via leaveReentrancyGuard() -- see the reentrancy-guard comment
++// below), to the SAME log file the Present1 diagnostic writes to
++// (%TEMP%\d2d_present_diagnostic.log), so the two can be read side by side and the timestamps
++// compared directly against the DXGI_STATUS_OCCLUDED transitions already being captured there.
++//
++// Remove this whole block, and its call sites below and in the header, once this has either
++// been ruled out or confirmed and folded into a real fix.
++#include <cstdio>
++
++namespace Direct2DAdapterChangeDiagnostic
++{
++    inline void logEvent (const char* label) noexcept
++    {
++        SYSTEMTIME st;
++        GetLocalTime (&st);
++
++        char line[256]{};
++        std::snprintf (line, sizeof (line),
++                        "[%02u:%02u:%02u.%03u] D2D_DIAG [AdapterChange] %s\n",
++                        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, label);
++
++        OutputDebugStringA (line);
++
++        char tempPath[MAX_PATH]{};
++        if (GetTempPathA (MAX_PATH, tempPath) != 0)
++        {
++            char fullPath[MAX_PATH + 64]{};
++            std::snprintf (fullPath, sizeof (fullPath), "%sd2d_present_diagnostic.log", tempPath);
++
++            if (auto* f = std::fopen (fullPath, "a"))
++            {
++                std::fputs (line, f);
++                std::fclose (f);
++            }
++        }
++    }
++}
++
++// Forward-declared here, defined just above adapterCreated()/adapterRemoved() below, and called
++// from leaveReentrancyGuard() in the header -- an ordinary function so it works regardless of
++// which of this .cpp/.h pair gets included first in the aggregate translation unit.
++void logDeferredTeardownRun() noexcept
++{
++    Direct2DAdapterChangeDiagnostic::logEvent ("leaveReentrancyGuard: running deferred teardown() now");
++}
++// ========================= END DIAGNOSTIC LOGGING ==========================
++
+ /*  ScopedGeometryWithSink creates an ID2D1PathGeometry object with an open sink. */
+ struct ScopedGeometryWithSink
+ {
+@@ -793,9 +855,11 @@ void Direct2DGraphicsContext::Pimpl::adapterCreated (DxgiAdapter::Ptr newAdapter
+         if (reentrancyGuardCount > 0)
+         {
+             teardownDeferred = true;
++            Direct2DAdapterChangeDiagnostic::logEvent ("adapterCreated: adapter changed while reentrancy guard held -- deferring teardown()");
+             return;
+         }
+ 
++        Direct2DAdapterChangeDiagnostic::logEvent ("adapterCreated: adapter changed -- running teardown() now");
+         teardown();
+     }
+ }
+@@ -810,9 +874,11 @@ void Direct2DGraphicsContext::Pimpl::adapterRemoved (DxgiAdapter::Ptr expiringAd
+         if (reentrancyGuardCount > 0)
+         {
+             teardownDeferred = true;
++            Direct2DAdapterChangeDiagnostic::logEvent ("adapterRemoved: adapter removed while reentrancy guard held -- deferring teardown()");
+             return;
+         }
+ 
++        Direct2DAdapterChangeDiagnostic::logEvent ("adapterRemoved: adapter removed -- running teardown() now");
+         teardown();
+     }
+ }
+diff --git a/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.h b/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.h
+index 7ca8f9e..83dc2a8 100644
+--- a/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.h
++++ b/modules/juce_graphics/native/juce_Direct2DGraphicsContextImpl_windows.h
+@@ -35,6 +35,14 @@
+ namespace juce
+ {
+ 
++// Temporary diagnostic (see the .cpp, added 2026-10-12): logs when a deferred teardown() -- see
++// leaveReentrancyGuard() below -- actually runs. Defined in
++// juce_Direct2DGraphicsContextImpl_windows.cpp; declared here as an ordinary function (not
++// inline) so it works regardless of which of this .h/.cpp pair the aggregate translation unit
++// includes first. Remove this declaration and its one call site below together with the rest
++// of that diagnostic.
++void logDeferredTeardownRun() noexcept;
++
+ struct Direct2DGraphicsContext::Pimpl : private DxgiAdapterListener
+ {
+ public:
+@@ -146,6 +154,7 @@ public:
+         if (--reentrancyGuardCount == 0 && teardownDeferred)
+         {
+             teardownDeferred = false;
++            logDeferredTeardownRun();
+             teardown();
+         }
+     }
