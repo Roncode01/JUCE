@@ -1,0 +1,101 @@
+diff --git a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
+index e92f36c..c73b53d 100644
+--- a/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
++++ b/modules/juce_gui_basics/native/juce_Direct2DHwndContext_windows.cpp
+@@ -158,13 +158,39 @@ public:
+ 
+     bool canPresent()
+     {
++        if (occluded)
++            return pollForRecovery();
++
+         didWait = didWait || event == nullptr || (WaitForSingleObjectEx (event.get(), 0, true) == WAIT_OBJECT_0);
+         return didWait;
+     }
+ 
+-    void didPresent()
++    void didPresent (HRESULT hr)
+     {
+-        didWait = false;
++        if (hr == S_OK)
++        {
++            didWait = false;
++            occluded = false;
++            return;
++        }
++
++        // Any other success code -- DXGI_STATUS_OCCLUDED while covered by the lock screen or
++        // screensaver, or an unidentified non-S_OK success code (e.g. around a hibernate
++        // resume) -- means DXGI accepted the call, but gives no guarantee that *this*
++        // particular frame will ever actually retire and re-signal the frame-latency
++        // waitable object. Treating any such code as "safely consumed" (an earlier version
++        // of this fix did exactly that) risks waiting forever on a semaphore count that's
++        // never replenished, which stops painting outright -- a worse failure than the
++        // flicker this exists to fix. (This is exactly the trade-off the original patch's
++        // own author and reviewer discussed and deliberately avoided -- see
++        // github.com/Minimal-Audio/JUCE/pull/41.)
++        //
++        // So: leave didWait untouched -- never ask canPresent() to wait again on the
++        // strength of this call alone -- and switch to standby. canPresent() will stop
++        // submitting real frames and instead probe for recovery via pollForRecovery(),
++        // which can't hit this problem because it never submits anything that would need
++        // to retire.
++        occluded = true;
+     }
+ 
+     static constexpr uint32 swapChainFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+@@ -172,6 +198,30 @@ public:
+     static constexpr uint32 presentFlags = 0;
+ 
+ private:
++    // Called from canPresent() while occluded, instead of attempting a real present. Uses
++    // DXGI_PRESENT_TEST, which runs the occlusion check without presenting any data --
++    // Microsoft's documented recovery pattern for DXGI_STATUS_OCCLUDED (DXGI programming
++    // guide, "Care and feeding of the swap chain"). Unlike a real Present1, this can't
++    // consume or depend on a frame-latency wait slot, since nothing is actually submitted
++    // that would need to retire -- safe to call every readiness check for as long as we're
++    // in standby. (The guide's caveat about not using the occlusion code itself to drive
++    // fullscreen-exclusive mode switching doesn't apply here: this is an ordinary windowed
++    // swap chain, never fullscreen-exclusive.)
++    bool pollForRecovery()
++    {
++        DXGI_PRESENT_PARAMETERS testParams{};
++        if (chain->Present1 (0, DXGI_PRESENT_TEST, &testParams) != S_OK)
++            return false; // still occluded (or some other non-S_OK code); stay in standby.
++
++        // Confirmed recovered. Let the very next real frame through immediately rather than
++        // demanding a fresh wait first -- nothing (real or otherwise) has actually been
++        // presented in a while, so there's nothing yet to pace against. Normal throttling
++        // resumes from that next real present onward, via didPresent().
++        occluded = false;
++        didWait = true;
++        return true;
++    }
++
+     ComSmartPtr<IDXGISurface> getSurface() const
+     {
+         if (chain == nullptr)
+@@ -229,6 +279,7 @@ private:
+     ComSmartPtr<ID2D1Bitmap1> buffer;
+     WindowsScopedEvent event;
+     bool didWait = false;
++    bool occluded = false;
+ };
+ 
+ //==============================================================================
+@@ -508,8 +559,13 @@ public:
+             return;
+         }
+ 
+-        if (hr == S_OK)
+-            swap.didPresent();
++        // hr is a success code here (FAILED already returned above). didPresent() decides
++        // what that means: only a literal S_OK resets the present-throttle directly; any
++        // other success code (DXGI_STATUS_OCCLUDED, or an unidentified one around e.g. a
++        // hibernate resume) switches into an occlusion-standby state instead, since we can't
++        // assume that frame will ever actually retire. See SwapChain::didPresent() and
++        // SwapChain::pollForRecovery() above.
++        swap.didPresent (hr);
+ 
+         // There's nothing waiting to be displayed in the backbuffer.
+         deferredRepaints.clear();

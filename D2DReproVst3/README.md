@@ -1,85 +1,64 @@
-# D2D Repro VST3 -- v5 diagnostic (adapter-change teardown logging)
+# D2D Repro VST3 -- v2 occlusion-standby test (minimal, no diagnostic, no teardown fix)
 
-Not a new fix. This is the v5 build (patches 1-4, byte-identical to what you already have) plus
-one extra, purely observational patch, added to chase down a regression report: with the v3
-build (patches 1-3), with or without patch 4, the screensaver/lock-screen flicker you'd
-previously confirmed fixed ("no flickering observed") came back.
+A deliberately stripped-down build, to isolate one specific question raised by the regression
+report: the v3 build (`direct2d-occlusion-standby-v3.patch`, used in all the other D2DReproVst3
+packages) showed the screensaver/lock-screen flicker you'd previously confirmed fixed coming
+back -- and it came back whether or not the separate `direct2d-reentrant-teardown-fix-v1.patch`
+was also applied.
 
-## What the first diagnostic log already told us
+This build keeps only the two patches below. No diagnostic-logging patch, no teardown/
+reentrancy-guard patch:
 
-Your `%TEMP%\d2d_present_diagnostic.log` from the flickering session showed exactly two
-`Present1` calls around the lock event -- one that returned `DXGI_STATUS_OCCLUDED`, and the
-next one (2.1 seconds later) that returned `S_OK` again -- with nothing logged in between. That
-is what v3's occlusion-standby logic (`canPresent()` / `pollForRecovery()` / `didPresent()`)
-is *supposed* to produce: while occluded, real presents stop almost entirely and the code polls
-via a cheap `DXGI_PRESENT_TEST` call instead (which isn't itself logged, by design -- it's not
-the real present), until it sees recovery and lets the next real frame through. In other words:
-the mechanism patches 1-3 added is doing exactly what it was built to do here. That rules it out
-as the cause of what you're now seeing -- whatever's flickering, it isn't `Present1` returning
-the wrong thing or the standby loop misbehaving.
+1. `direct2d-frame-latency-wait.patch` -- the base patch. Unchanged from every other build.
+2. `direct2d-occlusion-standby.patch` -- **this is "v2"**, not the same file as
+   `direct2d-occlusion-standby-v3.patch` used elsewhere. It's the corrected-but-never-built
+   revision from the chat history: an explicit `occluded`/`pollForRecovery()` design (same shape
+   as v3), written up as analysis only and never actually wired into a D2DReproVst3 build or
+   tested until now.
 
-## What this patch adds
+## Why this specific combination
 
-`direct2d-adapter-change-diagnostic.patch` instruments the *other* mechanism already under
-investigation in this project: `DxgiAdapters` -> `adapterCreated()`/`adapterRemoved()` ->
-`teardown()`, which tears down and recreates the entire Direct2D device context, swap chain and
-DirectComposition visual tree. This path is triggered by `WM_DISPLAYCHANGE`/`WM_SETTINGCHANGE`,
-not by anything `Present1` returns -- and on some driver/display configurations, locking or
-unlocking the screen (or a screensaver engaging) *can* fire one of those messages, even though
-it's logically just a lock, not an actual monitor change. If that's happening here, a full
-teardown-and-rebuild of the swap chain and composition visual slotting in asynchronously is a
-plausible, completely independent source of a visible flicker -- and it would explain why it
-shows up "with or without" patch 4: patch 4 only changes *when* `teardown()` runs relative to a
-reentrant call (immediately vs. deferred, to avoid the crash), not *whether* it runs, or that
-it's visually disruptive when it does.
+`direct2d-occlusion-didpresent.patch` -- call it v1 -- is what's actually deployed in the real
+plugin (StereoSplitBandPhaseAdjuster 1.20.0), and it does not flicker there on lock/screensaver.
+v2 and v3 both superseded v1 because v1 had a theoretical flaw (treating any non-`FAILED` result,
+including `DXGI_STATUS_OCCLUDED`, as "safely consumed" -- risking a frame-latency wait that never
+gets satisfied). v2 and v3 are functionally identical to each other for a plain occlusion
+transition: both gate real presents on a literal `hr == S_OK` and poll via
+`Present1(0, DXGI_PRESENT_TEST, ...)` while occluded. The only difference is v3's extra handling
+for a genuine `FAILED(hr)` seen *during* that poll (v2 just stays in standby forever on any
+non-`S_OK` code, including a real failure; v3 clears the occluded flag on a real failure so the
+next real present's own existing failure-handling runs instead of polling forever) -- a case a
+plain lock/unlock shouldn't ever hit, since nothing's actually failing.
 
-It adds three log lines, written to the same log file patch 2 already writes to, with the same
-timestamp format, so the two logs can be read side by side:
+So this build should behave identically to the v3 build for this scenario. What differs is
+everything *around* it: no diagnostic patch's extra per-frame `DXGI_PRESENT_TEST` probe, no
+reentrancy-guard code wrapping `prepare()`/`startFrame()`/`finishFrame()`, no composition-
+teardown destructor. If this build:
 
-- `adapterCreated: adapter changed -- running teardown() now` (and the `adapterRemoved`
-  equivalent) -- logged right before an *immediate* teardown().
-- `adapterCreated: adapter changed while reentrancy guard held -- deferring teardown()` (and the
-  `adapterRemoved` equivalent) -- logged when the reentrancy guard (patch 4) defers it instead.
-- `leaveReentrancyGuard: running deferred teardown() now` -- logged when that deferred
-  teardown() actually runs, once the guard releases.
-
-Nothing here changes behaviour -- it's observation only, inert except for the three `fopen`/
-`OutputDebugStringA` calls themselves. Same caveat as patch 2: remove it once it's done its job.
-
-## How to test
-
-1. Build and install exactly as before -- same `PRODUCT_NAME`, so it replaces whichever
-   D2DReproVst3 build is currently installed. (`PLUGIN_CODE` is `D2d6` here, just so REAPER
-   doesn't confuse it with the `D2d5` build, in case you still have both installed somewhere.)
-2. Reproduce the flicker (screensaver or lock screen, same as before).
-3. Grab `%TEMP%\d2d_present_diagnostic.log` afterwards and check: does an `[AdapterChange]` line
-   appear at or near the same timestamp as the `DXGI_STATUS_OCCLUDED` transition in the
-   `[Present1 normal]`/`[Present1 test]` lines?
-   - **If yes** -- that confirms a display-change notification is firing on this lock/unlock and
-     triggering a real teardown+rebuild, which is a solid, evidenced target for an actual fix
-     (most likely: skip the teardown/rebuild when the "new" adapter is actually the same
-     physical adapter, which `DxgiAdapters::updateAdapters()`'s own `uniqueIDMatches()` check
-     almost gets there already -- worth understanding exactly why it doesn't match in this
-     case).
-   - **If no `[AdapterChange]` line appears at all** -- this mechanism isn't firing either, and
-     the flicker is coming from something neither diagnostic currently instruments (worth
-     reconsidering candidates: the composition commit itself, a DWM-level effect unrelated to
-     this plugin's own Direct2D calls, or something in REAPER's own window handling around
-     lock/unlock).
-
-Either answer is useful -- this is designed to narrow it down, not to fix anything yet.
+- **Still flickers** -- that implicates the occlusion-standby design itself (shared by v2 and
+  v3), independent of the diagnostic or teardown patches or anything about how they interact
+  with it. Worth then comparing carefully against v1's simpler logic to see what actually
+  differs in practice, not just on paper.
+- **Doesn't flicker** -- that points at something in the diagnostic patch, the teardown patch,
+  or an interaction between either of them and the standby logic -- worth revisiting with that
+  narrowed down, rather than the standby design itself.
 
 ## Verification so far (2026-10-12)
 
-- All five patches apply cleanly in sequence to a fresh, independent JUCE 9.0.3 checkout, same
-  method as every patch before it (`git apply` against a separate clone).
-- Confirmed in the actually-patched source: the new log call sites in `adapterCreated()`/
-  `adapterRemoved()`, the forward-declared `logDeferredTeardownRun()` in the header, and its
-  definition and call site in `leaveReentrancyGuard()`.
-- Patches 1-4 are unchanged from the v5 build you already have -- confirmed byte-identical.
-- **Not compiled** (same limitation as always -- no Windows environment here). This one is
-  slightly higher-confidence than most: it only adds `fopen`/`OutputDebugStringA` calls using
-  the exact same Windows APIs (`GetTempPathA`, `SYSTEMTIME`, `GetLocalTime`) patch 2 already
-  uses successfully in a different module, plus one ordinary forward-declared free function to
-  cross the header/cpp boundary cleanly (specifically to avoid repeating the protected-type
-  mistake patch 4 hit) -- but it's still unverified by an actual compiler until your next build.
+- Both patches apply cleanly in sequence to a fresh JUCE 9.0.3 checkout (confirmed previously,
+  2026-10-10, and re-confirmed here).
+- Verified through a real CMake `FetchContent` configure (fetches JUCE 9.0.3 over the network
+  and runs both patches through its own populate+patch step).
+- `Source/` here is your own D2DReproVst3 app code, copied as-is from your repo -- unmodified.
+- **Not compiled** (no Windows environment here) and **not run against the real repro** -- same
+  standing limitation as every build in this project. This is purely to get a clean, minimal
+  binary in your hands to test against the lock-screen/screensaver scenario.
+
+## How to test
+
+1. Build and install exactly like the other D2DReproVst3 builds -- same `PRODUCT_NAME`, so it
+   replaces whichever one is currently installed.
+2. Lock the screen / trigger the screensaver, same as the test that showed the regression.
+3. Note whether it flickers. If you still have the diagnostic patch's log file from a previous
+   build, a fresh `%TEMP%\d2d_present_diagnostic.log` won't be produced by this build (no
+   diagnostic patch here) -- so this round is a plain visual yes/no, not a log comparison.
